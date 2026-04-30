@@ -155,3 +155,29 @@ function tst(msg, type) {
   document.body.appendChild(t);
   setTimeout(() => t.remove(), 3500);
 }
+
+// Apply a single row from POST/PUT into local state and re-render the active tab,
+// avoiding a full /api/shipments round-trip after each save.
+function patchLocal(row, isNew) {
+  if (!row || row.id == null) return;
+  const formatted = formatDateForFrontend(row);
+  if (isNew) {
+    D.unshift(formatted);
+  } else {
+    const idx = D.findIndex(d => d.id === formatted.id);
+    if (idx >= 0) D[idx] = formatted; else D.unshift(formatted);
+  }
+  updLU();
+  ref();
+  if (typeof cT !== 'undefined') {
+    if (cT === 'exec') rExec();
+    else if (cT === 'ongoing') rOg();
+    else if (cT === 'done') rDn();
+    else if (cT === 'analytics') rAnalytics();
+    else if (cT === 'consignee') rConsignee();
+    else if (cT === 'stats') { rCh(); rMo(); }
+  }
+  try {
+    if (typeof createOfflineAI === 'function') aiR = createOfflineAI(it, D);
+  } catch (e) { /* ignore AI re-init errors */ }
+}

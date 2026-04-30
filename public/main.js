@@ -61,13 +61,15 @@ document.getElementById('cn-sel').addEventListener('change', function() { rConsi
   document.addEventListener('click', () => { dd.style.display = 'none'; });
   dd.addEventListener('click', e => { e.stopPropagation(); });
   
-  setInterval(() => {
+  const cnsPollId = setInterval(() => {
     if (!it) return;
-    if (listEl.innerHTML !== "") return;
+    if (listEl.innerHTML !== "") { clearInterval(cnsPollId); return; }
     const cs = {};
     it.forEach(d => { if(d.consignee) cs[d.consignee.trim()] = 1; });
     const names = Object.keys(cs).sort();
+    if (!names.length) return;
     listEl.innerHTML = names.map(c => `<label style="display:block;padding:4px 12px;font-size:11px;cursor:pointer"><input type="checkbox" class="cns-pt-cb" value="${c}" checked style="margin-right:6px">${c}</label>`).join('');
+    clearInterval(cnsPollId);
   }, 1000);
   
   allCb.addEventListener('change', () => {

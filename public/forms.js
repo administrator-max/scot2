@@ -102,11 +102,12 @@ document.getElementById('btn-upd-og').addEventListener('click', async function()
       body: JSON.stringify(updates)
     });
     if (res.ok) {
+      const row = await res.json();
       document.getElementById('frm-og').classList.add('hid');
       tst('Shipment updated in database', 'ok');
-      await fetchShipments(); // Fetches fresh data
+      patchLocal(row);
     } else throw new Error('Update Failed');
-  } catch(e) { tst('Failed to update: ' + e.message, 'er'); } 
+  } catch(e) { tst('Failed to update: ' + e.message, 'er'); }
   finally { btn.disabled = false; }
 });
 
@@ -141,11 +142,12 @@ document.getElementById('btn-add-new').addEventListener('click', async function(
       body: JSON.stringify(rec)
     });
     if (res.ok) {
+      const row = await res.json();
       document.getElementById('frm-new').classList.add('hid');
       tst('New shipment saved to database', 'ok');
-      await fetchShipments(); // Fetches fresh data
+      patchLocal(row, true);
     } else throw new Error('Save failed');
-  } catch(e) { tst('Failed to save new shipment', 'er'); } 
+  } catch(e) { tst('Failed to save new shipment', 'er'); }
   finally { btn.disabled = false; }
 });
 
