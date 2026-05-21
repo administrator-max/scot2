@@ -61,6 +61,9 @@ function gp(d) {
   if (d.status === "Contract") return {s:-2, l:"Contract", u:""};
   if (d.status === "Booked") return {s:-1, l:"Booked", u:""};
   if (d.status === "On Going" && d.remarks && d.remarks.toLowerCase().includes("awaiting")) return {s:45, l:"in Transit", u:d.remarks};
+  if (d.status === "Done") {
+    return {s:6, l:d.warehouse_location ? "At Warehouse" : "Completed", u:d.warehouse_location || ""};
+  }
   
   if (d.cargo_type === "Domestic") {
     if (d.enter_warehouse) return {s:6, l:"At Warehouse", u:d.warehouse_location || ""};
@@ -68,7 +71,6 @@ function gp(d) {
     return {s:4, l:"Waiting", u:""};
   }
   
-  if (d.status === "Done" && d.warehouse_location) return {s:6, l:"At Warehouse", u:d.warehouse_location};
   if (d.enter_warehouse) return {s:6, l:"At Warehouse", u:d.warehouse_location || ""};
   if (d.start_delivery && !d.enter_warehouse) return {s:45, l:"In Transit", u:""};
   if (d.finish_unloading) return {s:4, l:"Unloaded", u:""};
