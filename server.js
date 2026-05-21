@@ -7,7 +7,16 @@ const path = require('path');
 const app = express();
 app.use(cors());
 app.use(express.json({ limit: '10mb' }));
-app.use(express.static(path.join(__dirname, 'public'), { maxAge: '1h', etag: true }));
+app.use(express.static(path.join(__dirname, 'public'), {
+  etag: true,
+  setHeaders: (res, filePath) => {
+    if (/\.(html|js|css)$/i.test(filePath)) {
+      res.setHeader('Cache-Control', 'no-cache');
+    } else {
+      res.setHeader('Cache-Control', 'public, max-age=3600');
+    }
+  }
+}));
 
 // PostgreSQL Database Connection Pool (tuned)
 const pool = new Pool({
@@ -24,6 +33,66 @@ const pool = new Pool({
 });
 
 pool.on('error', err => console.error('[pg pool error]', err));
+
+let hasUpdatedAtColumn = false;
+
+async function refreshColumnCapabilities() {
+  const result = await pool.query(`
+    SELECT EXISTS (
+      SELECT 1
+      FROM information_schema.columns
+      WHERE table_name = 'shipments'
+        AND column_name = 'updated_at'
+    ) AS exists
+  `);
+  hasUpdatedAtColumn = Boolean(result.rows[0]?.exists);
+}
+
+async function ensureDatabaseShape() {
+  try {
+    await pool.query('ALTER TABLE shipments ADD COLUMN IF NOT EXISTS created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP');
+    await pool.query('ALTER TABLE shipments ADD COLUMN IF NOT EXISTS updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP');
+  } catch (err) {
+    console.warn('[db migration warning] Could not ensure timestamp columns:', err.message);
+  }
+
+  try {
+    await refreshColumnCapabilities();
+  } catch (err) {
+    hasUpdatedAtColumn = false;
+    console.warn('[db warning] Could not inspect shipment columns:', err.message);
+  }
+
+  if (!hasUpdatedAtColumn) {
+    console.warn('[db warning] shipments.updated_at is unavailable; updates will run without timestamp bumping.');
+    return;
+  }
+
+  try {
+    await pool.query(`
+      CREATE OR REPLACE FUNCTION trg_set_updated_at() RETURNS TRIGGER AS $$
+      BEGIN
+          NEW.updated_at = NOW();
+          RETURN NEW;
+      END;
+      $$ LANGUAGE plpgsql;
+    `);
+    await pool.query('DROP TRIGGER IF EXISTS shipments_set_updated_at ON shipments');
+    await pool.query(`
+      CREATE TRIGGER shipments_set_updated_at
+          BEFORE UPDATE ON shipments
+          FOR EACH ROW EXECUTE FUNCTION trg_set_updated_at()
+    `);
+  } catch (err) {
+    console.warn('[db migration warning] Could not ensure updated_at trigger:', err.message);
+  }
+}
+
+function buildUpdateSetClause(keys) {
+  const assignments = keys.map((k, i) => `${k} = $${i + 1}`);
+  if (hasUpdatedAtColumn) assignments.push('updated_at = NOW()');
+  return assignments.join(', ');
+}
 
 // Whitelist of writable columns. Anything else from client is silently dropped.
 // id/created_at/updated_at are managed by the DB.
@@ -86,8 +155,8 @@ app.put('/api/shipments/:id', async (req, res) => {
     if (!keys.length) return res.status(400).json({ error: 'No valid fields provided' });
 
     const values = keys.map(k => data[k]);
-    const setClause = keys.map((k, i) => `${k} = $${i + 1}`).join(', ');
-    const query = `UPDATE shipments SET ${setClause}, updated_at = NOW() WHERE id = $${keys.length + 1} RETURNING *`;
+    const setClause = buildUpdateSetClause(keys);
+    const query = `UPDATE shipments SET ${setClause} WHERE id = $${keys.length + 1} RETURNING *`;
     const result = await pool.query(query, [...values, id]);
     if (!result.rows.length) return res.status(404).json({ error: 'Shipment not found' });
     res.json(result.rows[0]);
@@ -115,10 +184,10 @@ app.post('/api/shipments/bulk', async (req, res) => {
         const keys = Object.keys(data);
         if (!keys.length) continue;
         const values = keys.map(k => data[k]);
-        const setClause = keys.map((k, i) => `${k} = $${i + 1}`).join(', ');
-        const query = `UPDATE shipments SET ${setClause}, updated_at = NOW() WHERE id = $${keys.length + 1}`;
-        await client.query(query, [...values, id]);
-        updatedCount++;
+        const setClause = buildUpdateSetClause(keys);
+        const query = `UPDATE shipments SET ${setClause} WHERE id = $${keys.length + 1}`;
+        const result = await client.query(query, [...values, id]);
+        updatedCount += result.rowCount;
       }
     }
 
@@ -161,4 +230,6 @@ app.post('/api/shipments/bulk', async (req, res) => {
 
 // Express Server Port
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log(`🚀 Server running on port ${PORT}`));
+ensureDatabaseShape().finally(() => {
+  app.listen(PORT, () => console.log(`🚀 Server running on port ${PORT}`));
+});

@@ -40,6 +40,15 @@ function mkField(f, val) {
   </div>`;
 }
 
+async function readApiError(res, fallback) {
+  try {
+    const body = await res.json();
+    return body.error || fallback;
+  } catch (_) {
+    return fallback;
+  }
+}
+
 document.getElementById('tab-upd-og').addEventListener('click', () => {
   document.getElementById('frm-og').classList.toggle('hid');
   document.getElementById('frm-new').classList.add('hid');
@@ -81,8 +90,8 @@ document.getElementById('sel-og').addEventListener('change', function() {
 });
 
 document.getElementById('btn-upd-og').addEventListener('click', async function() {
-  const id = +document.getElementById('sel-og').value;
-  if (!id && id !== 0) { tst('Select a shipment first', 'er'); return; }
+  const id = parseInt(document.getElementById('sel-og').value, 10);
+  if (!Number.isInteger(id) || id <= 0) { tst('Select a shipment first', 'er'); return; }
   
   const updates = {};
   document.querySelectorAll('#frm-og-fields [data-fk]').forEach(el => {
@@ -106,7 +115,7 @@ document.getElementById('btn-upd-og').addEventListener('click', async function()
       document.getElementById('frm-og').classList.add('hid');
       tst('Shipment updated in database', 'ok');
       patchLocal(row);
-    } else throw new Error('Update Failed');
+    } else throw new Error(await readApiError(res, 'Update failed'));
   } catch(e) { tst('Failed to update: ' + e.message, 'er'); }
   finally { btn.disabled = false; }
 });
@@ -146,8 +155,8 @@ document.getElementById('btn-add-new').addEventListener('click', async function(
       document.getElementById('frm-new').classList.add('hid');
       tst('New shipment saved to database', 'ok');
       patchLocal(row, true);
-    } else throw new Error('Save failed');
-  } catch(e) { tst('Failed to save new shipment', 'er'); }
+    } else throw new Error(await readApiError(res, 'Save failed'));
+  } catch(e) { tst('Failed to save new shipment: ' + e.message, 'er'); }
   finally { btn.disabled = false; }
 });
 
@@ -310,9 +319,9 @@ async function aC() {
       pnd = null;
       fi.value = "";
       await fetchShipments(); // Fetches fresh data
-    } else throw new Error("Server Error");
+    } else throw new Error(await readApiError(res, "Server Error"));
   } catch (error) {
-    tst("Failed to save changes", "er");
+    tst("Failed to save changes: " + error.message, "er");
     btn.innerText = "Apply Changes";
     btn.disabled = false;
   }

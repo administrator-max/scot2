@@ -47,6 +47,8 @@ document.getElementById("y-dn").addEventListener("change", e => { dY = e.target.
 
 // Consignee dropdown initialization
 document.getElementById('cns-data').addEventListener('change', function() { rConsSummary(); });
+document.getElementById('cns-period').addEventListener('change', function() { rConsSummary(); });
+document.getElementById('cns-month').addEventListener('change', function() { rConsSummary(); });
 document.getElementById('cn-sel').addEventListener('change', function() { rConsignee(); });
 
 (function() {
