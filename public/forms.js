@@ -55,7 +55,7 @@ document.getElementById('tab-upd-og').addEventListener('click', () => {
   document.getElementById('sec-upl').classList.add('hid');
   const sel = document.getElementById('sel-og');
   sel.innerHTML = '<option value="">-- Select --</option>';
-  it.forEach(d => {
+  it.filter(d => d.status !== 'Done').forEach(d => {
     sel.innerHTML += `<option value="${d._id}">${d.project_name} (${d.product}) [${d.status}]</option>`;
   });
   document.getElementById('frm-og-fields').innerHTML = '';
