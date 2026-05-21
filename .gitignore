@@ -1,3 +1,10 @@
 node_modules/
 .env
 *.log
+
+# Local assistant/sandbox state
+.claude/
+.calude/
+.codex/
+.sandbox/
+sandbox/
