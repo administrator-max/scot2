@@ -53,25 +53,36 @@ document.getElementById('tab-upd-og').addEventListener('click', () => {
   document.getElementById('frm-og').classList.toggle('hid');
   document.getElementById('frm-new').classList.add('hid');
   document.getElementById('sec-upl').classList.add('hid');
+  document.getElementById('sec-ocr').classList.add('hid');
   const sel = document.getElementById('sel-og');
   sel.innerHTML = '<option value="">-- Select --</option>';
   it.filter(d => d.status !== 'Done').forEach(d => {
     sel.innerHTML += `<option value="${d._id}">${d.project_name} (${d.product}) [${d.status}]</option>`;
   });
   document.getElementById('frm-og-fields').innerHTML = '';
+  document.getElementById('og-docs').innerHTML = 'Select a shipment to manage documents.';
 });
 
 document.getElementById('tab-upd-new').addEventListener('click', () => {
   document.getElementById('frm-new').classList.toggle('hid');
   document.getElementById('frm-og').classList.add('hid');
   document.getElementById('sec-upl').classList.add('hid');
+  document.getElementById('sec-ocr').classList.add('hid');
   document.getElementById('frm-new-fields').innerHTML = FLDS.map(f => mkField(f, '')).join('');
+  ocrFile = null; // manual entry, no pending OCR attachment
 });
 
 document.getElementById('tab-upl').addEventListener('click', () => {
   document.getElementById('sec-upl').classList.toggle('hid');
   document.getElementById('frm-og').classList.add('hid');
   document.getElementById('frm-new').classList.add('hid');
+  document.getElementById('sec-ocr').classList.add('hid');
+});
+
+document.getElementById('tab-ocr').addEventListener('click', () => {
+  document.getElementById('sec-ocr').classList.toggle('hid');
+  document.getElementById('sec-upl').classList.add('hid');
+  document.getElementById('frm-og').classList.add('hid');
 });
 
 document.getElementById('sel-og').addEventListener('change', function() {
@@ -155,6 +166,18 @@ document.getElementById('btn-add-new').addEventListener('click', async function(
       document.getElementById('frm-new').classList.add('hid');
       tst('New shipment saved to database', 'ok');
       patchLocal(row, true);
+      // If this shipment came from an OCR scan, attach the source document.
+      if (ocrFile && row && row.id != null) {
+        try {
+          await uploadDocument(row.id, ocrFile, 'Other');
+          tst('Source document attached to shipment', 'ok');
+        } catch (de) {
+          tst('Shipment saved, but attaching document failed: ' + de.message, 'er');
+        }
+        ocrFile = null;
+        document.getElementById('sec-ocr').classList.add('hid');
+        document.getElementById('ocr-status').innerHTML = '';
+      }
     } else throw new Error(await readApiError(res, 'Save failed'));
   } catch(e) { tst('Failed to save new shipment: ' + e.message, 'er'); }
   finally { btn.disabled = false; }
@@ -325,4 +348,138 @@ async function aC() {
     btn.innerText = "Apply Changes";
     btn.disabled = false;
   }
+}
+
+// ==========================================
+// OCR SCAN → AUTO-FILL + DOCUMENT ATTACHMENTS
+// ==========================================
+let ocrFile = null; // scanned file awaiting attachment to the new shipment
+
+// Upload a File/Blob as a document for a shipment.
+async function uploadDocument(shipmentId, file, docType) {
+  const fd = new FormData();
+  fd.append("file", file);
+  if (docType) fd.append("doc_type", docType);
+  const res = await fetch(`/api/shipments/${shipmentId}/documents`, { method: "POST", body: fd });
+  if (!res.ok) throw new Error(await readApiError(res, "Upload failed"));
+  return res.json();
+}
+
+// ---- OCR drop zone ----
+const oz = document.getElementById("oz"), ofi = document.getElementById("ofi");
+oz.addEventListener("click", () => ofi.click());
+oz.addEventListener("dragover", e => { e.preventDefault(); oz.classList.add("ov"); });
+oz.addEventListener("dragleave", () => oz.classList.remove("ov"));
+oz.addEventListener("drop", e => { e.preventDefault(); oz.classList.remove("ov"); if (e.dataTransfer.files.length) runOcr(e.dataTransfer.files[0]); });
+ofi.addEventListener("change", e => { if (e.target.files.length) runOcr(e.target.files[0]); });
+
+async function runOcr(file) {
+  if (!/\.(pdf|png|jpe?g|webp|tiff?)$/i.test(file.name) && !(file.type || "").match(/pdf|image/)) {
+    tst("Please choose a PDF or image", "er"); return;
+  }
+  const st = document.getElementById("ocr-status");
+  st.innerHTML = `<div class="ch-sec" style="padding:16px"><span class="thk">📄 Extracting text & fields… scanned pages can take ~30s.</span></div>`;
+  const fd = new FormData();
+  fd.append("file", file);
+  try {
+    const res = await fetch("/api/ocr", { method: "POST", body: fd });
+    if (!res.ok) throw new Error(await readApiError(res, "OCR failed"));
+    const data = await res.json();
+    ocrFile = file;
+    fillNewFormFromOcr(data);
+    const n = Object.keys(data.fields || {}).length;
+    st.innerHTML = `<div class="ch-sec" style="padding:14px">
+      <div style="font-size:13px;font-weight:700;margin-bottom:4px">✅ Extracted ${n} field${n === 1 ? "" : "s"} — review below, then Save.</div>
+      <div style="font-size:11px;color:var(--muted)">Method: ${data.method} · Parser: ${data.source} · <span style="background:#fef9c3;padding:0 4px">Yellow</span> = OCR-filled · <span style="background:#fee2e2;padding:0 4px">Red</span> = low confidence (verify)</div>
+    </div>`;
+  } catch (e) {
+    st.innerHTML = `<div class="ch-sec" style="padding:14px;color:var(--red)">OCR failed: ${e.message}</div>`;
+    tst("OCR failed: " + e.message, "er");
+  }
+}
+
+function fillNewFormFromOcr(data) {
+  document.getElementById("frm-new").classList.remove("hid");
+  document.getElementById("frm-new-fields").innerHTML = FLDS.map(f => mkField(f, "")).join("");
+  const fields = data.fields || {};
+  const conf = data.confidence || {};
+  document.querySelectorAll("#frm-new-fields [data-fk]").forEach(el => {
+    const k = el.dataset.fk;
+    if (!(k in fields) || fields[k] == null || fields[k] === "") return;
+    let v = fields[k];
+    if (el.type === "date") {
+      const m = String(v).match(/\d{4}-\d{2}-\d{2}/);
+      v = m ? m[0] : "";
+    } else if (el.type === "number") {
+      v = String(v).replace(/[^\d.\-]/g, "");
+    }
+    el.value = v;
+    const c = Number(conf[k]);
+    const lowConf = Number.isFinite(c) && c < 0.6;
+    el.style.background = lowConf ? "#fee2e2" : "#fef9c3";
+    el.style.borderColor = lowConf ? "#ef4444" : "#eab308";
+    el.title = "OCR-filled" + (Number.isFinite(c) ? " · confidence " + Math.round(c * 100) + "%" : "");
+  });
+  document.getElementById("frm-new").scrollIntoView({ behavior: "smooth", block: "start" });
+}
+
+// ---- Documents manager (inside the Update Shipment form) ----
+document.getElementById("sel-og").addEventListener("change", function () {
+  const id = parseInt(this.value, 10);
+  if (Number.isInteger(id) && id > 0) loadOgDocs(id);
+  else document.getElementById("og-docs").innerHTML = "Select a shipment to manage documents.";
+});
+
+async function loadOgDocs(shipmentId) {
+  const host = document.getElementById("og-docs");
+  host.innerHTML = '<span style="color:var(--muted)">Loading documents…</span>';
+  try {
+    const res = await fetch(`/api/shipments/${shipmentId}/documents`);
+    if (!res.ok) throw new Error(await readApiError(res, "Failed to load"));
+    renderOgDocs(shipmentId, await res.json());
+  } catch (e) {
+    host.innerHTML = `<span style="color:var(--red)">${e.message}</span>`;
+  }
+}
+
+function fmtBytes(n) {
+  if (n == null) return "-";
+  if (n < 1024) return n + " B";
+  if (n < 1048576) return (n / 1024).toFixed(0) + " KB";
+  return (n / 1048576).toFixed(1) + " MB";
+}
+
+function renderOgDocs(shipmentId, docs) {
+  const host = document.getElementById("og-docs");
+  const list = docs.length ? `<table class="upl-tb" style="width:100%;margin-bottom:10px">
+    <tr><th>Type</th><th>File</th><th>Size</th><th>Uploaded</th><th></th></tr>
+    ${docs.map(d => `<tr>
+      <td>${d.doc_type || "-"}</td>
+      <td>${d.file_name || "-"}</td>
+      <td>${fmtBytes(d.size_bytes)}</td>
+      <td>${fD(d.uploaded_at)}</td>
+      <td><a href="/api/documents/${d.id}" target="_blank" rel="noopener">View</a> · <a href="/api/documents/${d.id}?download=1">Download</a></td>
+    </tr>`).join("")}
+  </table>` : '<p style="color:var(--muted);margin-bottom:10px">No documents attached yet.</p>';
+
+  host.innerHTML = `${list}
+    <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+      <select class="sbox" id="og-doc-type" style="width:auto;padding:6px 8px">
+        <option value="BL">BL</option><option value="PIB">PIB</option><option value="SuratJalan">Surat Jalan</option><option value="Other">Other</option>
+      </select>
+      <input type="file" id="og-doc-file" accept=".pdf,image/*" style="font-size:12px">
+      <button class="abtn" id="og-doc-up" style="padding:6px 12px">⬆️ Upload</button>
+    </div>`;
+
+  document.getElementById("og-doc-up").addEventListener("click", async () => {
+    const fi2 = document.getElementById("og-doc-file");
+    if (!fi2.files.length) { tst("Choose a file first", "er"); return; }
+    const btn = document.getElementById("og-doc-up");
+    btn.disabled = true;
+    try {
+      await uploadDocument(shipmentId, fi2.files[0], document.getElementById("og-doc-type").value);
+      tst("Document uploaded", "ok");
+      loadOgDocs(shipmentId);
+    } catch (e) { tst("Upload failed: " + e.message, "er"); btn.disabled = false; }
+  });
 }
