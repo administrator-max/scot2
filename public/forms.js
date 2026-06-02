@@ -69,7 +69,6 @@ document.getElementById('tab-upd-new').addEventListener('click', () => {
   document.getElementById('sec-upl').classList.add('hid');
   document.getElementById('sec-ocr').classList.add('hid');
   document.getElementById('frm-new-fields').innerHTML = FLDS.map(f => mkField(f, '')).join('');
-  ocrFile = null; // manual entry, no pending OCR attachment
 });
 
 document.getElementById('tab-upl').addEventListener('click', () => {
@@ -166,18 +165,10 @@ document.getElementById('btn-add-new').addEventListener('click', async function(
       document.getElementById('frm-new').classList.add('hid');
       tst('New shipment saved to database', 'ok');
       patchLocal(row, true);
-      // If this shipment came from an OCR scan, attach the source document.
-      if (ocrFile && row && row.id != null) {
-        try {
-          await uploadDocument(row.id, ocrFile, 'Other');
-          tst('Source document attached to shipment', 'ok');
-        } catch (de) {
-          tst('Shipment saved, but attaching document failed: ' + de.message, 'er');
-        }
-        ocrFile = null;
-        document.getElementById('sec-ocr').classList.add('hid');
-        document.getElementById('ocr-status').innerHTML = '';
-      }
+      // Scanned file is not stored (link-based attachments only). Add a Google
+      // Drive link later from the Update Shipment form if you want to attach it.
+      document.getElementById('sec-ocr').classList.add('hid');
+      document.getElementById('ocr-status').innerHTML = '';
     } else throw new Error(await readApiError(res, 'Save failed'));
   } catch(e) { tst('Failed to save new shipment: ' + e.message, 'er'); }
   finally { btn.disabled = false; }
@@ -351,17 +342,18 @@ async function aC() {
 }
 
 // ==========================================
-// OCR SCAN → AUTO-FILL + DOCUMENT ATTACHMENTS
+// OCR SCAN → AUTO-FILL + DOCUMENT LINKS
 // ==========================================
-let ocrFile = null; // scanned file awaiting attachment to the new shipment
 
-// Upload a File/Blob as a document for a shipment.
-async function uploadDocument(shipmentId, file, docType) {
-  const fd = new FormData();
-  fd.append("file", file);
-  if (docType) fd.append("doc_type", docType);
-  const res = await fetch(`/api/shipments/${shipmentId}/documents`, { method: "POST", body: fd });
-  if (!res.ok) throw new Error(await readApiError(res, "Upload failed"));
+// Attach a document LINK (e.g. Google Drive URL) to a shipment. No file is
+// stored — only the URL is saved, so there is no storage burden.
+async function addDocumentLink(shipmentId, payload) {
+  const res = await fetch(`/api/shipments/${shipmentId}/documents`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload)
+  });
+  if (!res.ok) throw new Error(await readApiError(res, "Save failed"));
   return res.json();
 }
 
@@ -385,11 +377,10 @@ async function runOcr(file) {
     const res = await fetch("/api/ocr", { method: "POST", body: fd });
     if (!res.ok) throw new Error(await readApiError(res, "OCR failed"));
     const data = await res.json();
-    ocrFile = file;
     fillNewFormFromOcr(data);
     const n = Object.keys(data.fields || {}).length;
     st.innerHTML = `<div class="ch-sec" style="padding:14px">
-      <div style="font-size:13px;font-weight:700;margin-bottom:4px">✅ Extracted ${n} field${n === 1 ? "" : "s"} — review below, then Save.</div>
+      <div style="font-size:13px;font-weight:700;margin-bottom:4px">✅ Extracted ${n} field${n === 1 ? "" : "s"} — review below, then Save. (The scanned file is not stored.)</div>
       <div style="font-size:11px;color:var(--muted)">Method: ${data.method} · Parser: ${data.source} · <span style="background:#fef9c3;padding:0 4px">Yellow</span> = OCR-filled · <span style="background:#fee2e2;padding:0 4px">Red</span> = low confidence (verify)</div>
     </div>`;
   } catch (e) {
@@ -442,44 +433,55 @@ async function loadOgDocs(shipmentId) {
   }
 }
 
-function fmtBytes(n) {
-  if (n == null) return "-";
-  if (n < 1024) return n + " B";
-  if (n < 1048576) return (n / 1024).toFixed(0) + " KB";
-  return (n / 1048576).toFixed(1) + " MB";
-}
-
 function renderOgDocs(shipmentId, docs) {
   const host = document.getElementById("og-docs");
   const list = docs.length ? `<table class="upl-tb" style="width:100%;margin-bottom:10px">
-    <tr><th>Type</th><th>File</th><th>Size</th><th>Uploaded</th><th></th></tr>
+    <tr><th>Type</th><th>Label</th><th>Link</th><th>Added</th><th></th></tr>
     ${docs.map(d => `<tr>
       <td>${d.doc_type || "-"}</td>
       <td>${d.file_name || "-"}</td>
-      <td>${fmtBytes(d.size_bytes)}</td>
+      <td><a href="${d.storage_url}" target="_blank" rel="noopener">Open ↗</a></td>
       <td>${fD(d.uploaded_at)}</td>
-      <td><a href="/api/documents/${d.id}" target="_blank" rel="noopener">View</a> · <a href="/api/documents/${d.id}?download=1">Download</a></td>
+      <td><a href="#" data-del="${d.id}" style="color:var(--red)">Remove</a></td>
     </tr>`).join("")}
-  </table>` : '<p style="color:var(--muted);margin-bottom:10px">No documents attached yet.</p>';
+  </table>` : '<p style="color:var(--muted);margin-bottom:10px">No document links yet.</p>';
 
   host.innerHTML = `${list}
     <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
       <select class="sbox" id="og-doc-type" style="width:auto;padding:6px 8px">
         <option value="BL">BL</option><option value="PIB">PIB</option><option value="SuratJalan">Surat Jalan</option><option value="Other">Other</option>
       </select>
-      <input type="file" id="og-doc-file" accept=".pdf,image/*" style="font-size:12px">
-      <button class="abtn" id="og-doc-up" style="padding:6px 12px">⬆️ Upload</button>
+      <input type="text" class="sbox" id="og-doc-label" placeholder="Label (optional)" style="width:140px;padding:6px 8px">
+      <input type="url" class="sbox" id="og-doc-url" placeholder="Paste Google Drive link…" style="flex:1;min-width:200px;padding:6px 8px">
+      <button class="abtn" id="og-doc-add" style="padding:6px 12px">🔗 Add Link</button>
     </div>`;
 
-  document.getElementById("og-doc-up").addEventListener("click", async () => {
-    const fi2 = document.getElementById("og-doc-file");
-    if (!fi2.files.length) { tst("Choose a file first", "er"); return; }
-    const btn = document.getElementById("og-doc-up");
+  document.getElementById("og-doc-add").addEventListener("click", async () => {
+    const url = document.getElementById("og-doc-url").value.trim();
+    if (!/^https?:\/\//i.test(url)) { tst("Paste a valid http(s) link", "er"); return; }
+    const btn = document.getElementById("og-doc-add");
     btn.disabled = true;
     try {
-      await uploadDocument(shipmentId, fi2.files[0], document.getElementById("og-doc-type").value);
-      tst("Document uploaded", "ok");
+      await addDocumentLink(shipmentId, {
+        storage_url: url,
+        doc_type: document.getElementById("og-doc-type").value,
+        file_name: document.getElementById("og-doc-label").value.trim() || null
+      });
+      tst("Link added", "ok");
       loadOgDocs(shipmentId);
-    } catch (e) { tst("Upload failed: " + e.message, "er"); btn.disabled = false; }
+    } catch (e) { tst("Failed to add link: " + e.message, "er"); btn.disabled = false; }
+  });
+
+  host.querySelectorAll("[data-del]").forEach(a => {
+    a.addEventListener("click", async (e) => {
+      e.preventDefault();
+      if (!confirm("Remove this document link?")) return;
+      try {
+        const r = await fetch(`/api/documents/${a.dataset.del}`, { method: "DELETE" });
+        if (!r.ok) throw new Error(await readApiError(r, "Delete failed"));
+        tst("Link removed", "ok");
+        loadOgDocs(shipmentId);
+      } catch (err) { tst(err.message, "er"); }
+    });
   });
 }

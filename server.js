@@ -149,6 +149,15 @@ function sanitize(body) {
   return clean;
 }
 
+function isHttpUrl(u) {
+  try {
+    const x = new URL(String(u));
+    return x.protocol === 'http:' || x.protocol === 'https:';
+  } catch (_) {
+    return false;
+  }
+}
+
 // GET: Fetch all shipments
 app.get('/api/shipments', async (req, res) => {
   try {
@@ -287,22 +296,23 @@ app.post('/api/ocr', upload.single('file'), async (req, res) => {
   }
 });
 
-// POST: attach a document (PDF/image) to a shipment — stored as Postgres BYTEA.
-app.post('/api/shipments/:id/documents', upload.single('file'), async (req, res) => {
+// POST: attach a document LINK (e.g. Google Drive URL) to a shipment.
+// Stores only the URL in `storage_url` — no file bytes, no storage burden.
+app.post('/api/shipments/:id/documents', async (req, res) => {
   try {
     const id = parseInt(req.params.id, 10);
     if (!Number.isInteger(id)) return res.status(400).json({ error: 'Invalid id' });
-    if (!req.file) return res.status(400).json({ error: 'No file uploaded' });
-    if (!ALLOWED_DOC_MIME.test(req.file.mimetype)) {
-      return res.status(400).json({ error: 'Unsupported file type (PDF or image only)' });
+    const { storage_url, doc_type, file_name } = req.body || {};
+    if (!isHttpUrl(storage_url)) {
+      return res.status(400).json({ error: 'A valid http(s) link is required' });
     }
-    const docType = typeof req.body.doc_type === 'string' && req.body.doc_type
-      ? req.body.doc_type.slice(0, 50) : null;
+    const docType = typeof doc_type === 'string' && doc_type ? doc_type.slice(0, 50) : null;
+    const label = typeof file_name === 'string' && file_name ? file_name.slice(0, 255) : null;
     const result = await pool.query(
-      `INSERT INTO shipment_documents (shipment_id, doc_type, file_name, mime_type, file_bytes)
-       VALUES ($1, $2, $3, $4, $5)
-       RETURNING id, shipment_id, doc_type, file_name, mime_type, uploaded_at`,
-      [id, docType, (req.file.originalname || 'document').slice(0, 255), req.file.mimetype, req.file.buffer]
+      `INSERT INTO shipment_documents (shipment_id, doc_type, file_name, storage_url)
+       VALUES ($1, $2, $3, $4)
+       RETURNING id, shipment_id, doc_type, file_name, storage_url, uploaded_at`,
+      [id, docType, label, String(storage_url)]
     );
     res.json(result.rows[0]);
   } catch (err) {
@@ -311,14 +321,13 @@ app.post('/api/shipments/:id/documents', upload.single('file'), async (req, res)
   }
 });
 
-// GET: list documents for a shipment (metadata only — never the bytes).
+// GET: list document links for a shipment.
 app.get('/api/shipments/:id/documents', async (req, res) => {
   try {
     const id = parseInt(req.params.id, 10);
     if (!Number.isInteger(id)) return res.status(400).json({ error: 'Invalid id' });
     const result = await pool.query(
-      `SELECT id, shipment_id, doc_type, file_name, mime_type,
-              octet_length(file_bytes) AS size_bytes, uploaded_at
+      `SELECT id, shipment_id, doc_type, file_name, storage_url, uploaded_at
        FROM shipment_documents
        WHERE shipment_id = $1
        ORDER BY uploaded_at DESC, id DESC`,
@@ -332,22 +341,30 @@ app.get('/api/shipments/:id/documents', async (req, res) => {
   }
 });
 
-// GET: stream a single document. ?download=1 forces a download.
+// DELETE: remove a document link.
+app.delete('/api/documents/:docId', async (req, res) => {
+  try {
+    const docId = parseInt(req.params.docId, 10);
+    if (!Number.isInteger(docId)) return res.status(400).json({ error: 'Invalid id' });
+    const result = await pool.query('DELETE FROM shipment_documents WHERE id = $1', [docId]);
+    if (!result.rowCount) return res.status(404).json({ error: 'Document not found' });
+    res.json({ success: true });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// GET: resolve a document — redirects to its stored link.
 app.get('/api/documents/:docId', async (req, res) => {
   try {
     const docId = parseInt(req.params.docId, 10);
     if (!Number.isInteger(docId)) return res.status(400).json({ error: 'Invalid id' });
-    const result = await pool.query(
-      'SELECT file_name, mime_type, file_bytes FROM shipment_documents WHERE id = $1',
-      [docId]
-    );
-    if (!result.rows.length) return res.status(404).json({ error: 'Document not found' });
-    const doc = result.rows[0];
-    const disposition = req.query.download === '1' ? 'attachment' : 'inline';
-    const safeName = (doc.file_name || 'document').replace(/[\r\n"]/g, '');
-    res.setHeader('Content-Type', doc.mime_type || 'application/octet-stream');
-    res.setHeader('Content-Disposition', `${disposition}; filename="${safeName}"`);
-    res.send(doc.file_bytes);
+    const result = await pool.query('SELECT storage_url FROM shipment_documents WHERE id = $1', [docId]);
+    if (!result.rows.length || !result.rows[0].storage_url) {
+      return res.status(404).json({ error: 'Document not found' });
+    }
+    res.redirect(result.rows[0].storage_url);
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: err.message });
