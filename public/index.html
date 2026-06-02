@@ -17,6 +17,7 @@
   <button class="nb act" data-tab="exec">Executive Summary</button>
   <button class="nb" data-tab="ongoing">In Progress <span class="pl" id="og-c"></span></button>
   <button class="nb" data-tab="done">Completed <span class="pl" id="dn-c"></span></button>
+  <button class="nb" data-tab="alerts">⚠️ Alerts <span class="pl" id="al-c" style="background:#dc2626;color:#fff"></span></button>
   <button class="nb" data-tab="analytics">Analytics</button>
   <button class="nb" data-tab="consignee">Consignee</button>
   <button class="nb" data-tab="stats">Statistics</button>
@@ -179,6 +180,7 @@
     <div class="sc" style="margin-bottom:14px"><p style="font-size:12px;color:var(--muted)"><strong>On Time</strong> = all within schedule. <strong>Delayed</strong> = sailing >2d over est, customs >3d, or unloading >3d. Click numbers for details.</p></div>
     <div class="mg" id="mg"></div>
   </div>
+  <div id="p-alerts" class="hid"></div>
   <div id="p-upload" class="hid">
     <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-bottom:16px">
       <div class="ch-sec" style="cursor:pointer" id="tab-upd-og"><div style="text-align:center;padding:10px"><div style="font-size:28px;margin-bottom:6px">✏️</div><div style="font-size:13px;font-weight:700">Update On Going Shipment</div><div style="font-size:10px;color:var(--muted);margin-top:3px">Update Contract, Booked & On Going shipments</div></div></div>
@@ -220,6 +222,7 @@
 <script src="ui.js"></script>
 <script src="forms.js"></script>
 <script src="ai.js"></script>
+<script src="alerts.js"></script>
 <script src="main.js"></script>
 
 </body>

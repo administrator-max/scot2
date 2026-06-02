@@ -101,6 +101,17 @@ function gm(d) {
   return r ? r.substring(0, 7) : null;
 }
 
+// Alerts for a shipment = the existing delay signals (_d: Sailing/Customs/Unload)
+// plus an "ETA passed while still On Going" overdue check. Kept separate from _d
+// so existing delay analytics keep their original semantics.
+function shipmentAlerts(d) {
+  const a = (d._d || []).slice();
+  if (d.status === "On Going" && d.eta && T >= d.eta) {
+    a.push({ t: "ETA", d: "overdue" });
+  }
+  return a;
+}
+
 function fD(d) {
   if (!d || d === "-") return "-";
   return new Date(d).toLocaleDateString("en-GB", {day:"numeric", month:"short", year:"numeric"});
@@ -135,6 +146,12 @@ function ref() {
   bkI = it.filter(d => d.status === "Booked");
   document.getElementById("og-c").textContent = ogI.length;
   document.getElementById("dn-c").textContent = dnI.length;
+  const alEl = document.getElementById("al-c");
+  if (alEl) {
+    const n = it.filter(d => shipmentAlerts(d).length).length;
+    alEl.textContent = n;
+    alEl.style.display = n ? "" : "none";
+  }
 }
 
 function updLU() {
@@ -175,6 +192,7 @@ function patchLocal(row, isNew) {
     if (cT === 'exec') rExec();
     else if (cT === 'ongoing') rOg();
     else if (cT === 'done') rDn();
+    else if (cT === 'alerts') rAlerts();
     else if (cT === 'analytics') rAnalytics();
     else if (cT === 'consignee') rConsignee();
     else if (cT === 'stats') { rCh(); rMo(); }
