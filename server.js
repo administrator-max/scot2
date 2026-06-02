@@ -3,10 +3,17 @@ const express = require('express');
 const cors = require('cors');
 const { Pool } = require('pg');
 const path = require('path');
+const multer = require('multer');
+const ocr = require('./lib/ocr');
 
 const app = express();
 app.use(cors());
 app.use(express.json({ limit: '10mb' }));
+
+// Uploads are held in memory and streamed straight into Postgres (BYTEA) — the
+// Heroku dyno filesystem is ephemeral, so nothing persistent touches disk.
+const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 20 * 1024 * 1024 } });
+const ALLOWED_DOC_MIME = /^(application\/pdf|image\/(png|jpe?g|webp|tiff?))$/i;
 app.use(express.static(path.join(__dirname, 'public'), {
   etag: true,
   setHeaders: (res, filePath) => {
@@ -18,19 +25,27 @@ app.use(express.static(path.join(__dirname, 'public'), {
   }
 }));
 
-// PostgreSQL Database Connection Pool (tuned)
-const pool = new Pool({
-  host: process.env.PGHOST,
-  database: process.env.PGDATABASE,
-  user: process.env.PGUSER,
-  password: process.env.PGPASSWORD,
-  port: process.env.PGPORT || 5432,
-  ssl: { rejectUnauthorized: false },
+// PostgreSQL Database Connection Pool (tuned).
+// Prefer DATABASE_URL when present (Heroku Postgres addon / staging); otherwise
+// fall back to discrete PG* vars (production). Production has no DATABASE_URL,
+// so its connection behavior is unchanged.
+const poolTuning = {
   max: 10,
   idleTimeoutMillis: 30000,
   connectionTimeoutMillis: 5000,
   statement_timeout: 15000
-});
+};
+const pool = process.env.DATABASE_URL
+  ? new Pool({ connectionString: process.env.DATABASE_URL, ssl: { rejectUnauthorized: false }, ...poolTuning })
+  : new Pool({
+      host: process.env.PGHOST,
+      database: process.env.PGDATABASE,
+      user: process.env.PGUSER,
+      password: process.env.PGPASSWORD,
+      port: process.env.PGPORT || 5432,
+      ssl: { rejectUnauthorized: false },
+      ...poolTuning
+    });
 
 pool.on('error', err => console.error('[pg pool error]', err));
 
@@ -54,6 +69,26 @@ async function ensureDatabaseShape() {
     await pool.query('ALTER TABLE shipments ADD COLUMN IF NOT EXISTS updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP');
   } catch (err) {
     console.warn('[db migration warning] Could not ensure timestamp columns:', err.message);
+  }
+
+  // Document attachments (additive, idempotent — does not touch `shipments`).
+  // Mirrors scripts/migrate.js so a fresh staging DB self-heals on boot.
+  try {
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS shipment_documents (
+        id          SERIAL PRIMARY KEY,
+        shipment_id INTEGER REFERENCES shipments(id) ON DELETE CASCADE,
+        doc_type    VARCHAR(50),
+        file_name   VARCHAR(255),
+        mime_type   VARCHAR(100),
+        file_bytes  BYTEA,
+        storage_url TEXT,
+        uploaded_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      )
+    `);
+    await pool.query('CREATE INDEX IF NOT EXISTS idx_shipdoc_shipment ON shipment_documents(shipment_id)');
+  } catch (err) {
+    console.warn('[db migration warning] Could not ensure shipment_documents table:', err.message);
   }
 
   try {
@@ -225,6 +260,97 @@ app.post('/api/shipments/bulk', async (req, res) => {
     res.status(500).json({ error: err.message });
   } finally {
     client.release();
+  }
+});
+
+// POST: OCR a document and return pre-filled fields (does NOT write to DB).
+// Human-in-the-loop: the client reviews/corrects before saving via /api/shipments.
+app.post('/api/ocr', upload.single('file'), async (req, res) => {
+  try {
+    if (!req.file) return res.status(400).json({ error: 'No file uploaded' });
+    if (!ALLOWED_DOC_MIME.test(req.file.mimetype) && !/\.pdf$/i.test(req.file.originalname || '')) {
+      return res.status(400).json({ error: 'Unsupported file type (PDF or image only)' });
+    }
+    const { text, method } = await ocr.extractText(req.file.buffer, req.file.mimetype, req.file.originalname);
+    const parsed = await ocr.parseFields(text);
+    res.set('Cache-Control', 'no-store');
+    res.json({
+      method,                       // 'text-layer' | 'ocr'
+      source: parsed.source,        // 'llm' | 'regex' | 'empty'
+      fields: parsed.fields,
+      confidence: parsed.confidence,
+      textPreview: (text || '').slice(0, 2000)
+    });
+  } catch (err) {
+    console.error('[ocr]', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// POST: attach a document (PDF/image) to a shipment — stored as Postgres BYTEA.
+app.post('/api/shipments/:id/documents', upload.single('file'), async (req, res) => {
+  try {
+    const id = parseInt(req.params.id, 10);
+    if (!Number.isInteger(id)) return res.status(400).json({ error: 'Invalid id' });
+    if (!req.file) return res.status(400).json({ error: 'No file uploaded' });
+    if (!ALLOWED_DOC_MIME.test(req.file.mimetype)) {
+      return res.status(400).json({ error: 'Unsupported file type (PDF or image only)' });
+    }
+    const docType = typeof req.body.doc_type === 'string' && req.body.doc_type
+      ? req.body.doc_type.slice(0, 50) : null;
+    const result = await pool.query(
+      `INSERT INTO shipment_documents (shipment_id, doc_type, file_name, mime_type, file_bytes)
+       VALUES ($1, $2, $3, $4, $5)
+       RETURNING id, shipment_id, doc_type, file_name, mime_type, uploaded_at`,
+      [id, docType, (req.file.originalname || 'document').slice(0, 255), req.file.mimetype, req.file.buffer]
+    );
+    res.json(result.rows[0]);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// GET: list documents for a shipment (metadata only — never the bytes).
+app.get('/api/shipments/:id/documents', async (req, res) => {
+  try {
+    const id = parseInt(req.params.id, 10);
+    if (!Number.isInteger(id)) return res.status(400).json({ error: 'Invalid id' });
+    const result = await pool.query(
+      `SELECT id, shipment_id, doc_type, file_name, mime_type,
+              octet_length(file_bytes) AS size_bytes, uploaded_at
+       FROM shipment_documents
+       WHERE shipment_id = $1
+       ORDER BY uploaded_at DESC, id DESC`,
+      [id]
+    );
+    res.set('Cache-Control', 'no-store');
+    res.json(result.rows);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// GET: stream a single document. ?download=1 forces a download.
+app.get('/api/documents/:docId', async (req, res) => {
+  try {
+    const docId = parseInt(req.params.docId, 10);
+    if (!Number.isInteger(docId)) return res.status(400).json({ error: 'Invalid id' });
+    const result = await pool.query(
+      'SELECT file_name, mime_type, file_bytes FROM shipment_documents WHERE id = $1',
+      [docId]
+    );
+    if (!result.rows.length) return res.status(404).json({ error: 'Document not found' });
+    const doc = result.rows[0];
+    const disposition = req.query.download === '1' ? 'attachment' : 'inline';
+    const safeName = (doc.file_name || 'document').replace(/[\r\n"]/g, '');
+    res.setHeader('Content-Type', doc.mime_type || 'application/octet-stream');
+    res.setHeader('Content-Disposition', `${disposition}; filename="${safeName}"`);
+    res.send(doc.file_bytes);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: err.message });
   }
 });
 
