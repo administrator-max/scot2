@@ -404,32 +404,64 @@ oz.addEventListener("dragleave", () => oz.classList.remove("ov"));
 oz.addEventListener("drop", e => { e.preventDefault(); oz.classList.remove("ov"); if (e.dataTransfer.files.length) runOcr(e.dataTransfer.files[0]); });
 ofi.addEventListener("change", e => { if (e.target.files.length) runOcr(e.target.files[0]); });
 
+function ocrProcessingHtml(secs) {
+  return `<div class="ch-sec" style="padding:16px"><span class="thk">📄 Memproses OCR… ${secs}s &nbsp;<span style="color:var(--muted);font-weight:400">(dokumen scan bisa ~30–90 dtk, mohon tunggu — jangan tutup tab)</span></span></div>`;
+}
+
 async function runOcr(file) {
   if (!/\.(pdf|png|jpe?g|webp|tiff?)$/i.test(file.name) && !(file.type || "").match(/pdf|image/)) {
     tst("Please choose a PDF or image", "er"); return;
   }
   const st = document.getElementById("ocr-status");
-  st.innerHTML = `<div class="ch-sec" style="padding:16px"><span class="thk">📄 Extracting text & fields… scanned pages can take ~30s.</span></div>`;
+  st.innerHTML = ocrProcessingHtml(0);
   const fd = new FormData();
   fd.append("file", file);
   try {
     const res = await fetch("/api/ocr", { method: "POST", body: fd });
-    if (!res.ok) {
-      if (res.status === 503 || res.status === 504) {
-        throw new Error("Dokumen terlalu besar/banyak halaman — OCR melebihi batas waktu 30 detik. Coba file lebih kecil / 1–2 halaman saja, atau isi form manual.");
-      }
-      throw new Error(await readApiError(res, "OCR gagal (HTTP " + res.status + ")"));
-    }
-    const data = await res.json();
-    fillNewFormFromOcr(data);
-    const n = Object.keys(data.fields || {}).length;
-    st.innerHTML = `<div class="ch-sec" style="padding:14px">
-      <div style="font-size:13px;font-weight:700;margin-bottom:4px">✅ Extracted ${n} field${n === 1 ? "" : "s"} — review below, then Save. (The scanned file is not stored.)</div>
-      <div style="font-size:11px;color:var(--muted)">Method: ${data.method} · Parser: ${data.source} · <span style="background:#fef9c3;padding:0 4px">Yellow</span> = OCR-filled · <span style="background:#fee2e2;padding:0 4px">Red</span> = low confidence (verify)</div>
-    </div>`;
+    if (!res.ok) throw new Error(await readApiError(res, "OCR gagal (HTTP " + res.status + ")"));
+    const { jobId } = await res.json();
+    if (!jobId) throw new Error("Server tidak memberi job OCR");
+    await pollOcr(jobId, st);
   } catch (e) {
     st.innerHTML = `<div class="ch-sec" style="padding:14px;color:var(--red)">⚠️ ${e.message}</div>`;
     tst(e.message, "er");
+  }
+}
+
+// Poll an async OCR job until done/error (or a hard 4-minute cap).
+async function pollOcr(jobId, st) {
+  const started = Date.now();
+  const MAX_MS = 4 * 60 * 1000;
+  let netFails = 0;
+  while (true) {
+    await new Promise(r => setTimeout(r, 2000));
+    const secs = Math.round((Date.now() - started) / 1000);
+    st.innerHTML = ocrProcessingHtml(secs);
+    if (Date.now() - started > MAX_MS) {
+      throw new Error("OCR terlalu lama (>4 menit). Coba file lebih kecil / halaman lebih sedikit, atau isi form manual.");
+    }
+    let data;
+    try {
+      const r = await fetch(`/api/ocr/${jobId}`);
+      if (r.status === 404) throw new Error("Job OCR kedaluwarsa (server mungkin restart). Coba upload ulang.");
+      if (!r.ok) { if (++netFails > 5) throw new Error("Gagal cek status OCR berulang kali."); continue; }
+      data = await r.json();
+      netFails = 0;
+    } catch (e) {
+      if (++netFails > 5) throw e;
+      continue;
+    }
+    if (data.status === "done") {
+      fillNewFormFromOcr(data);
+      const n = Object.keys(data.fields || {}).length;
+      st.innerHTML = `<div class="ch-sec" style="padding:14px">
+        <div style="font-size:13px;font-weight:700;margin-bottom:4px">✅ Extracted ${n} field${n === 1 ? "" : "s"} dalam ${secs}s — review below, then Save. (The scanned file is not stored.)</div>
+        <div style="font-size:11px;color:var(--muted)">Method: ${data.method} · Parser: ${data.source} · <span style="background:#fef9c3;padding:0 4px">Yellow</span> = OCR-filled · <span style="background:#fee2e2;padding:0 4px">Red</span> = low confidence (verify)</div>
+      </div>`;
+      return;
+    }
+    if (data.status === "error") throw new Error(data.error || "OCR gagal memproses dokumen");
+    // else: still processing → continue polling
   }
 }
 
