@@ -69,6 +69,7 @@ document.getElementById('tab-upd-new').addEventListener('click', () => {
   document.getElementById('sec-upl').classList.add('hid');
   document.getElementById('sec-ocr').classList.add('hid');
   document.getElementById('frm-new-fields').innerHTML = FLDS.map(f => mkField(f, '')).join('');
+  ocrFilledKeys = new Set(); // manual entry — no OCR-sourced fields
 });
 
 document.getElementById('tab-upl').addEventListener('click', () => {
@@ -132,10 +133,11 @@ document.getElementById('btn-upd-og').addEventListener('click', async function()
 
 document.getElementById('btn-can-og').addEventListener('click', () => document.getElementById('frm-og').classList.add('hid'));
 
-document.getElementById('btn-add-new').addEventListener('click', async function() {
+// Step 1: gather + validate, then open the review popup (does NOT save yet).
+document.getElementById('btn-add-new').addEventListener('click', function() {
   const rec = {};
   let hasName = false;
-  
+
   document.querySelectorAll('#frm-new-fields [data-fk]').forEach(el => {
     const k = el.dataset.fk, v = el.value;
     if (k === 'project_name' && v) hasName = true;
@@ -143,17 +145,51 @@ document.getElementById('btn-add-new').addEventListener('click', async function(
     if (el.type === 'number') rec[k] = parseFloat(v) || null;
     else rec[k] = v;
   });
-  
+
   if (!hasName) { tst('Project Name is required', 'er'); return; }
-  
+
   rec.no = D.length ? Math.max(...D.map(d => d.no || 0)) + 1 : 1;
   const rf = rec.eta || rec.etd || rec.start_delivery;
   rec.year = rf ? parseInt(rf.substring(0,4)) : new Date().getFullYear();
   if (!rec.status) rec.status = 'On Going';
-  
-  const btn = document.getElementById('btn-add-new');
-  btn.disabled = true;
 
+  showSaveReview(rec);
+});
+
+function closeReview() { document.getElementById('mo').classList.add('hid'); }
+
+// Verification popup: shows exactly what will be saved, OCR-sourced fields flagged.
+function showSaveReview(rec) {
+  const rows = FLDS
+    .filter(f => rec[f.k] != null && rec[f.k] !== '')
+    .map(f => {
+      const ocr = ocrFilledKeys.has(f.k)
+        ? ' <span class="mod-badge" style="background:#fef9c3;color:#92400e;border-color:#eab308">OCR</span>' : '';
+      return `<tr><td style="color:var(--muted);white-space:nowrap;padding-right:12px">${f.l}</td><td><strong>${rec[f.k]}</strong>${ocr}</td></tr>`;
+    }).join('');
+
+  const note = ocrFilledKeys.size
+    ? `<p style="font-size:11px;color:var(--muted);margin:10px 0 0">Tanda <span class="mod-badge" style="background:#fef9c3;color:#92400e;border-color:#eab308">OCR</span> = hasil baca dokumen — mohon diperiksa kebenarannya.</p>`
+    : '';
+
+  document.getElementById('mt').textContent = 'Review sebelum simpan';
+  document.getElementById('mb').innerHTML = `
+    <p style="font-size:12px;margin-bottom:10px">Periksa data berikut. Jika sudah benar, tekan <strong>Setujui &amp; Simpan</strong>.</p>
+    <table class="upl-tb" style="width:100%">${rows}</table>
+    ${note}
+    <div style="display:flex;gap:8px;margin-top:16px;justify-content:flex-end">
+      <button class="cbtn" id="btn-review-cancel">Batal</button>
+      <button class="abtn" id="btn-review-save">✅ Setujui &amp; Simpan</button>
+    </div>`;
+  document.getElementById('mo').classList.remove('hid');
+  document.getElementById('btn-review-cancel').addEventListener('click', closeReview);
+  document.getElementById('btn-review-save').addEventListener('click', () => commitNewShipment(rec));
+}
+
+// Step 2: user approved in the popup — actually persist.
+async function commitNewShipment(rec) {
+  const btn = document.getElementById('btn-review-save');
+  if (btn) { btn.disabled = true; btn.innerText = 'Menyimpan…'; }
   try {
     const res = await fetch('/api/shipments', {
       method: 'POST',
@@ -162,17 +198,19 @@ document.getElementById('btn-add-new').addEventListener('click', async function(
     });
     if (res.ok) {
       const row = await res.json();
+      closeReview();
       document.getElementById('frm-new').classList.add('hid');
       tst('New shipment saved to database', 'ok');
-      patchLocal(row, true);
-      // Scanned file is not stored (link-based attachments only). Add a Google
-      // Drive link later from the Update Shipment form if you want to attach it.
+      patchLocal(row, true); // marks it as Modified in the dashboard
       document.getElementById('sec-ocr').classList.add('hid');
       document.getElementById('ocr-status').innerHTML = '';
+      ocrFilledKeys = new Set();
     } else throw new Error(await readApiError(res, 'Save failed'));
-  } catch(e) { tst('Failed to save new shipment: ' + e.message, 'er'); }
-  finally { btn.disabled = false; }
-});
+  } catch(e) {
+    tst('Failed to save new shipment: ' + e.message, 'er');
+    if (btn) { btn.disabled = false; btn.innerText = '✅ Setujui & Simpan'; }
+  }
+}
 
 document.getElementById('btn-can-new').addEventListener('click', () => document.getElementById('frm-new').classList.add('hid'));
 
@@ -344,6 +382,7 @@ async function aC() {
 // ==========================================
 // OCR SCAN → AUTO-FILL + DOCUMENT LINKS
 // ==========================================
+let ocrFilledKeys = new Set(); // keys filled from the last OCR scan (for the review badge)
 
 // Attach a document LINK (e.g. Google Drive URL) to a shipment. No file is
 // stored — only the URL is saved, so there is no storage burden.
@@ -375,7 +414,12 @@ async function runOcr(file) {
   fd.append("file", file);
   try {
     const res = await fetch("/api/ocr", { method: "POST", body: fd });
-    if (!res.ok) throw new Error(await readApiError(res, "OCR failed"));
+    if (!res.ok) {
+      if (res.status === 503 || res.status === 504) {
+        throw new Error("Dokumen terlalu besar/banyak halaman — OCR melebihi batas waktu 30 detik. Coba file lebih kecil / 1–2 halaman saja, atau isi form manual.");
+      }
+      throw new Error(await readApiError(res, "OCR gagal (HTTP " + res.status + ")"));
+    }
     const data = await res.json();
     fillNewFormFromOcr(data);
     const n = Object.keys(data.fields || {}).length;
@@ -384,8 +428,8 @@ async function runOcr(file) {
       <div style="font-size:11px;color:var(--muted)">Method: ${data.method} · Parser: ${data.source} · <span style="background:#fef9c3;padding:0 4px">Yellow</span> = OCR-filled · <span style="background:#fee2e2;padding:0 4px">Red</span> = low confidence (verify)</div>
     </div>`;
   } catch (e) {
-    st.innerHTML = `<div class="ch-sec" style="padding:14px;color:var(--red)">OCR failed: ${e.message}</div>`;
-    tst("OCR failed: " + e.message, "er");
+    st.innerHTML = `<div class="ch-sec" style="padding:14px;color:var(--red)">⚠️ ${e.message}</div>`;
+    tst(e.message, "er");
   }
 }
 
@@ -394,9 +438,11 @@ function fillNewFormFromOcr(data) {
   document.getElementById("frm-new-fields").innerHTML = FLDS.map(f => mkField(f, "")).join("");
   const fields = data.fields || {};
   const conf = data.confidence || {};
+  ocrFilledKeys = new Set();
   document.querySelectorAll("#frm-new-fields [data-fk]").forEach(el => {
     const k = el.dataset.fk;
     if (!(k in fields) || fields[k] == null || fields[k] === "") return;
+    ocrFilledKeys.add(k);
     let v = fields[k];
     if (el.type === "date") {
       const m = String(v).match(/\d{4}-\d{2}-\d{2}/);
