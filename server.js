@@ -304,19 +304,10 @@ app.post('/api/ocr', upload.single('file'), (req, res) => {
     // Fire-and-forget: process after responding.
     (async () => {
       try {
-        const { text, method } = await ocr.extractText(buf, mime, name);
-        const parsed = await ocr.parseFields(text);
+        // Gemini (multimodal) when configured, else local tesseract/poppler + regex.
+        const result = await ocr.processDocument(buf, mime, name);
         const job = ocrJobs.get(jobId);
-        if (job) {
-          job.status = 'done';
-          job.result = {
-            method,                  // 'text-layer' | 'ocr'
-            source: parsed.source,   // 'llm' | 'regex' | 'empty'
-            fields: parsed.fields,
-            confidence: parsed.confidence,
-            textPreview: (text || '').slice(0, 2000)
-          };
-        }
+        if (job) { job.status = 'done'; job.result = result; }
       } catch (err) {
         console.error('[ocr job]', err);
         const job = ocrJobs.get(jobId);
