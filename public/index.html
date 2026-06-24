@@ -17,6 +17,7 @@
   <button class="nb act" data-tab="exec">Executive Summary</button>
   <button class="nb" data-tab="ongoing">In Progress <span class="pl" id="og-c"></span></button>
   <button class="nb" data-tab="done">Completed <span class="pl" id="dn-c"></span></button>
+  <button class="nb" data-tab="alerts">⚠️ Alerts <span class="pl" id="al-c" style="background:#dc2626;color:#fff"></span></button>
   <button class="nb" data-tab="analytics">Analytics</button>
   <button class="nb" data-tab="consignee">Consignee</button>
   <button class="nb" data-tab="stats">Statistics</button>
@@ -179,6 +180,7 @@
     <div class="sc" style="margin-bottom:14px"><p style="font-size:12px;color:var(--muted)"><strong>On Time</strong> = all within schedule. <strong>Delayed</strong> = sailing >2d over est, customs >3d, or unloading >3d. Click numbers for details.</p></div>
     <div class="mg" id="mg"></div>
   </div>
+  <div id="p-alerts" class="hid"></div>
   <div id="p-upload" class="hid">
     <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-bottom:16px">
       <div class="ch-sec" style="cursor:pointer" id="tab-upd-og"><div style="text-align:center;padding:10px"><div style="font-size:28px;margin-bottom:6px">✏️</div><div style="font-size:13px;font-weight:700">Update On Going Shipment</div><div style="font-size:10px;color:var(--muted);margin-top:3px">Update Contract, Booked & On Going shipments</div></div></div>
@@ -189,15 +191,23 @@
       <div style="margin-bottom:10px"><label style="font-size:11px;font-weight:600;color:var(--muted)">Select Shipment</label><select id="sel-og" class="sbox" style="margin-top:4px;width:100%"></select></div>
       <div id="frm-og-fields"></div>
       <div style="display:flex;gap:8px;margin-top:12px"><button class="abtn" id="btn-upd-og">💾 Save Update</button><button class="cbtn" id="btn-can-og">Cancel</button></div>
+      <hr style="border:none;border-top:1px solid var(--border);margin:16px 0">
+      <h4 style="font-size:13px;font-weight:700;margin-bottom:8px">📎 Document Links <span style="font-weight:400;color:var(--muted)">(Google Drive — no file stored)</span></h4>
+      <div id="og-docs" style="font-size:12px;color:var(--muted)">Select a shipment to manage document links.</div>
     </div>
     <div id="frm-new" class="ch-sec hid" style="margin-bottom:16px">
       <h3 style="font-size:14px;font-weight:700;margin-bottom:12px">➕ Add New Shipment</h3>
       <div id="frm-new-fields" style="display:grid;grid-template-columns:1fr 1fr;gap:8px"></div>
       <div style="display:flex;gap:8px;margin-top:12px"><button class="abtn" id="btn-add-new">💾 Save New Shipment</button><button class="cbtn" id="btn-can-new">Cancel</button></div>
     </div>
-    <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-bottom:16px">
+    <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:16px;margin-bottom:16px">
+      <div class="ch-sec" style="cursor:pointer" id="tab-ocr"><div style="text-align:center;padding:10px"><div style="font-size:28px;margin-bottom:6px">📄</div><div style="font-size:13px;font-weight:700">Scan Document (OCR)</div><div style="font-size:10px;color:var(--muted);margin-top:3px">Upload B/L, PIB, Surat Jalan → auto-fill new shipment</div></div></div>
       <div class="ch-sec" style="cursor:pointer" id="tab-upl"><div style="text-align:center;padding:10px"><div style="font-size:28px;margin-bottom:6px">📎</div><div style="font-size:13px;font-weight:700">Upload Excel File</div><div style="font-size:10px;color:var(--muted);margin-top:3px">Bulk update from Excel template</div></div></div>
       <div class="ch-sec" style="cursor:pointer" id="tab-exp"><div style="text-align:center;padding:10px"><div style="font-size:28px;margin-bottom:6px">📊</div><div style="font-size:13px;font-weight:700">Export to Excel</div><div style="font-size:10px;color:var(--muted);margin-top:3px">Download full database as .xlsx</div></div></div>
+    </div>
+    <div id="sec-ocr" class="hid">
+      <div class="upl" id="oz"><div style="font-size:36px;margin-bottom:8px">📄</div><p style="font-size:14px;font-weight:700;margin-bottom:4px">Select or drag & drop a PDF / image</p><p style="font-size:11px;color:var(--muted)">Ocean B/L, PIB, Surat Jalan — fields are extracted for you to review before saving</p><input type="file" id="ofi" accept=".pdf,image/*" style="display:none"></div>
+      <div id="ocr-status"></div>
     </div>
     <div id="sec-upl" class="hid">
       <div class="upl" id="uz"><div style="font-size:36px;margin-bottom:8px">📎</div><p style="font-size:14px;font-weight:700;margin-bottom:4px">Select or drag & drop Excel file</p><p style="font-size:11px;color:var(--muted)">Column A–AG format must match database template (.xlsx)</p><input type="file" id="fi" accept=".xlsx,.xls" style="display:none"></div>
@@ -220,6 +230,7 @@
 <script src="ui.js"></script>
 <script src="forms.js"></script>
 <script src="ai.js"></script>
+<script src="alerts.js"></script>
 <script src="main.js"></script>
 
 </body>

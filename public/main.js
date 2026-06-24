@@ -2,12 +2,13 @@
 // 6. APP CONTROLLER & INITIALIZATION
 // ==========================================
 const tm = {
-  exec: "p-exec", 
-  ongoing: "p-ongoing", 
-  done: "p-done", 
-  analytics: "p-analytics", 
-  consignee: "p-consignee", 
-  stats: "p-stats", 
+  exec: "p-exec",
+  ongoing: "p-ongoing",
+  done: "p-done",
+  alerts: "p-alerts",
+  analytics: "p-analytics",
+  consignee: "p-consignee",
+  stats: "p-stats",
   upload: "p-upload"
 };
 
@@ -26,6 +27,7 @@ document.querySelectorAll(".nb").forEach(t => {
     if (cT === "stats") { rCh(); rMo(); }
     if (cT === "done") rDn();
     if (cT === "ongoing") rOg();
+    if (cT === "alerts") rAlerts();
   });
 });
 
@@ -123,6 +125,7 @@ async function fetchShipments() {
     else if (cT === 'analytics') rAnalytics();
     else if (cT === 'consignee') rConsignee();
     else if (cT === 'stats') { rCh(); rMo(); }
+    else if (cT === 'alerts') rAlerts();
     else rExec(); // Fallback to exec
 
     // Re-initialize AI Chat with fresh data safely

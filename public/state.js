@@ -101,6 +101,31 @@ function gm(d) {
   return r ? r.substring(0, 7) : null;
 }
 
+// Alerts for a shipment = the existing delay signals (_d: Sailing/Customs/Unload)
+// plus an "ETA passed while still On Going" overdue check. Kept separate from _d
+// so existing delay analytics keep their original semantics.
+function shipmentAlerts(d) {
+  const a = (d._d || []).slice();
+  if (d.status === "On Going" && d.eta && T >= d.eta) {
+    a.push({ t: "ETA", d: "overdue" });
+  }
+  return a;
+}
+
+// IDs the user added/updated during this browser session — highlighted as modified.
+let sessionTouched = new Set();
+
+// "Recently modified" from timestamps: edited (updated_at meaningfully after
+// created_at) within the last 48h. Freshly-seeded rows have updated_at == created_at
+// so they are NOT flagged — only genuine edits light up.
+function isRecentlyUpdated(d) {
+  if (!d.updated_at) return false;
+  const u = new Date(d.updated_at).getTime();
+  if (isNaN(u)) return false;
+  const c = d.created_at ? new Date(d.created_at).getTime() : u;
+  return (u - c) > 60000 && (Date.now() - u) < 48 * 3600 * 1000;
+}
+
 function fD(d) {
   if (!d || d === "-") return "-";
   return new Date(d).toLocaleDateString("en-GB", {day:"numeric", month:"short", year:"numeric"});
@@ -128,13 +153,23 @@ function sc(d) {
 }
 
 function ref() {
-  it = D.map(d => ({...d, _id: d.id, _p: gp(d), _d: gd(d), _m: gm(d)}));
+  it = D.map(d => {
+    const o = {...d, _id: d.id, _p: gp(d), _d: gd(d), _m: gm(d)};
+    o._mod = sessionTouched.has(d.id) || isRecentlyUpdated(d);
+    return o;
+  });
   ogI = it.filter(d => d.status === "On Going");
   dnI = it.filter(d => d.status === "Done");
   ctI = it.filter(d => d.status === "Contract");
   bkI = it.filter(d => d.status === "Booked");
   document.getElementById("og-c").textContent = ogI.length;
   document.getElementById("dn-c").textContent = dnI.length;
+  const alEl = document.getElementById("al-c");
+  if (alEl) {
+    const n = it.filter(d => shipmentAlerts(d).length).length;
+    alEl.textContent = n;
+    alEl.style.display = n ? "" : "none";
+  }
 }
 
 function updLU() {
@@ -163,6 +198,7 @@ function tst(msg, type) {
 function patchLocal(row, isNew) {
   if (!row || row.id == null) return;
   const formatted = formatDateForFrontend(row);
+  sessionTouched.add(formatted.id);
   if (isNew) {
     D.unshift(formatted);
   } else {
@@ -175,6 +211,7 @@ function patchLocal(row, isNew) {
     if (cT === 'exec') rExec();
     else if (cT === 'ongoing') rOg();
     else if (cT === 'done') rDn();
+    else if (cT === 'alerts') rAlerts();
     else if (cT === 'analytics') rAnalytics();
     else if (cT === 'consignee') rConsignee();
     else if (cT === 'stats') { rCh(); rMo(); }

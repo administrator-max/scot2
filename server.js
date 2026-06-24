@@ -3,10 +3,18 @@ const express = require('express');
 const cors = require('cors');
 const { Pool } = require('pg');
 const path = require('path');
+const multer = require('multer');
+const crypto = require('crypto');
+const ocr = require('./lib/ocr');
 
 const app = express();
 app.use(cors());
 app.use(express.json({ limit: '10mb' }));
+
+// Uploads are held in memory and streamed straight into Postgres (BYTEA) — the
+// Heroku dyno filesystem is ephemeral, so nothing persistent touches disk.
+const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 20 * 1024 * 1024 } });
+const ALLOWED_DOC_MIME = /^(application\/pdf|image\/(png|jpe?g|webp|tiff?))$/i;
 app.use(express.static(path.join(__dirname, 'public'), {
   etag: true,
   setHeaders: (res, filePath) => {
@@ -18,19 +26,27 @@ app.use(express.static(path.join(__dirname, 'public'), {
   }
 }));
 
-// PostgreSQL Database Connection Pool (tuned)
-const pool = new Pool({
-  host: process.env.PGHOST,
-  database: process.env.PGDATABASE,
-  user: process.env.PGUSER,
-  password: process.env.PGPASSWORD,
-  port: process.env.PGPORT || 5432,
-  ssl: { rejectUnauthorized: false },
+// PostgreSQL Database Connection Pool (tuned).
+// Prefer DATABASE_URL when present (Heroku Postgres addon / staging); otherwise
+// fall back to discrete PG* vars (production). Production has no DATABASE_URL,
+// so its connection behavior is unchanged.
+const poolTuning = {
   max: 10,
   idleTimeoutMillis: 30000,
   connectionTimeoutMillis: 5000,
   statement_timeout: 15000
-});
+};
+const pool = process.env.DATABASE_URL
+  ? new Pool({ connectionString: process.env.DATABASE_URL, ssl: { rejectUnauthorized: false }, ...poolTuning })
+  : new Pool({
+      host: process.env.PGHOST,
+      database: process.env.PGDATABASE,
+      user: process.env.PGUSER,
+      password: process.env.PGPASSWORD,
+      port: process.env.PGPORT || 5432,
+      ssl: { rejectUnauthorized: false },
+      ...poolTuning
+    });
 
 pool.on('error', err => console.error('[pg pool error]', err));
 
@@ -54,6 +70,26 @@ async function ensureDatabaseShape() {
     await pool.query('ALTER TABLE shipments ADD COLUMN IF NOT EXISTS updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP');
   } catch (err) {
     console.warn('[db migration warning] Could not ensure timestamp columns:', err.message);
+  }
+
+  // Document attachments (additive, idempotent — does not touch `shipments`).
+  // Mirrors scripts/migrate.js so a fresh staging DB self-heals on boot.
+  try {
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS shipment_documents (
+        id          SERIAL PRIMARY KEY,
+        shipment_id INTEGER REFERENCES shipments(id) ON DELETE CASCADE,
+        doc_type    VARCHAR(50),
+        file_name   VARCHAR(255),
+        mime_type   VARCHAR(100),
+        file_bytes  BYTEA,
+        storage_url TEXT,
+        uploaded_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      )
+    `);
+    await pool.query('CREATE INDEX IF NOT EXISTS idx_shipdoc_shipment ON shipment_documents(shipment_id)');
+  } catch (err) {
+    console.warn('[db migration warning] Could not ensure shipment_documents table:', err.message);
   }
 
   try {
@@ -112,6 +148,15 @@ function sanitize(body) {
     if (ALLOWED_COLS.has(k)) clean[k] = body[k] === '' ? null : body[k];
   }
   return clean;
+}
+
+function isHttpUrl(u) {
+  try {
+    const x = new URL(String(u));
+    return x.protocol === 'http:' || x.protocol === 'https:';
+  } catch (_) {
+    return false;
+  }
 }
 
 // GET: Fetch all shipments
@@ -225,6 +270,140 @@ app.post('/api/shipments/bulk', async (req, res) => {
     res.status(500).json({ error: err.message });
   } finally {
     client.release();
+  }
+});
+
+// ---- Async OCR jobs ----
+// No Redis / worker dyno: jobs live in memory on the (single) web dyno and the
+// heavy work runs in a detached child process (tesseract via execFile), so it
+// does not block the event loop. The POST returns immediately with a jobId and
+// the client polls GET /api/ocr/:jobId — this sidesteps Heroku's 30s request cap.
+// Jobs are ephemeral: a dyno restart drops them (client just re-uploads).
+const ocrJobs = new Map(); // jobId -> { status, result, error, createdAt }
+const OCR_JOB_TTL_MS = 10 * 60 * 1000;
+
+function sweepOcrJobs() {
+  const now = Date.now();
+  for (const [id, job] of ocrJobs) {
+    if (now - job.createdAt > OCR_JOB_TTL_MS) ocrJobs.delete(id);
+  }
+}
+
+// POST: start an OCR job (does NOT write to DB, does NOT store the file).
+app.post('/api/ocr', upload.single('file'), (req, res) => {
+  try {
+    if (!req.file) return res.status(400).json({ error: 'No file uploaded' });
+    if (!ALLOWED_DOC_MIME.test(req.file.mimetype) && !/\.pdf$/i.test(req.file.originalname || '')) {
+      return res.status(400).json({ error: 'Unsupported file type (PDF or image only)' });
+    }
+    sweepOcrJobs();
+    const jobId = crypto.randomBytes(12).toString('hex');
+    ocrJobs.set(jobId, { status: 'processing', result: null, error: null, createdAt: Date.now() });
+
+    const buf = req.file.buffer, mime = req.file.mimetype, name = req.file.originalname;
+    // Fire-and-forget: process after responding.
+    (async () => {
+      try {
+        // Gemini (multimodal) when configured, else local tesseract/poppler + regex.
+        const result = await ocr.processDocument(buf, mime, name);
+        const job = ocrJobs.get(jobId);
+        if (job) { job.status = 'done'; job.result = result; }
+      } catch (err) {
+        console.error('[ocr job]', err);
+        const job = ocrJobs.get(jobId);
+        if (job) { job.status = 'error'; job.error = err.message; }
+      }
+    })();
+
+    res.status(202).json({ jobId, status: 'processing' });
+  } catch (err) {
+    console.error('[ocr]', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// GET: poll an OCR job. Returns { status } while processing; the fields when done.
+app.get('/api/ocr/:jobId', (req, res) => {
+  const job = ocrJobs.get(req.params.jobId);
+  if (!job) return res.status(404).json({ error: 'Job not found or expired' });
+  res.set('Cache-Control', 'no-store');
+  if (job.status === 'done') return res.json({ status: 'done', ...job.result });
+  if (job.status === 'error') return res.json({ status: 'error', error: job.error });
+  res.json({ status: job.status });
+});
+
+// POST: attach a document LINK (e.g. Google Drive URL) to a shipment.
+// Stores only the URL in `storage_url` — no file bytes, no storage burden.
+app.post('/api/shipments/:id/documents', async (req, res) => {
+  try {
+    const id = parseInt(req.params.id, 10);
+    if (!Number.isInteger(id)) return res.status(400).json({ error: 'Invalid id' });
+    const { storage_url, doc_type, file_name } = req.body || {};
+    if (!isHttpUrl(storage_url)) {
+      return res.status(400).json({ error: 'A valid http(s) link is required' });
+    }
+    const docType = typeof doc_type === 'string' && doc_type ? doc_type.slice(0, 50) : null;
+    const label = typeof file_name === 'string' && file_name ? file_name.slice(0, 255) : null;
+    const result = await pool.query(
+      `INSERT INTO shipment_documents (shipment_id, doc_type, file_name, storage_url)
+       VALUES ($1, $2, $3, $4)
+       RETURNING id, shipment_id, doc_type, file_name, storage_url, uploaded_at`,
+      [id, docType, label, String(storage_url)]
+    );
+    res.json(result.rows[0]);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// GET: list document links for a shipment.
+app.get('/api/shipments/:id/documents', async (req, res) => {
+  try {
+    const id = parseInt(req.params.id, 10);
+    if (!Number.isInteger(id)) return res.status(400).json({ error: 'Invalid id' });
+    const result = await pool.query(
+      `SELECT id, shipment_id, doc_type, file_name, storage_url, uploaded_at
+       FROM shipment_documents
+       WHERE shipment_id = $1
+       ORDER BY uploaded_at DESC, id DESC`,
+      [id]
+    );
+    res.set('Cache-Control', 'no-store');
+    res.json(result.rows);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// DELETE: remove a document link.
+app.delete('/api/documents/:docId', async (req, res) => {
+  try {
+    const docId = parseInt(req.params.docId, 10);
+    if (!Number.isInteger(docId)) return res.status(400).json({ error: 'Invalid id' });
+    const result = await pool.query('DELETE FROM shipment_documents WHERE id = $1', [docId]);
+    if (!result.rowCount) return res.status(404).json({ error: 'Document not found' });
+    res.json({ success: true });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// GET: resolve a document — redirects to its stored link.
+app.get('/api/documents/:docId', async (req, res) => {
+  try {
+    const docId = parseInt(req.params.docId, 10);
+    if (!Number.isInteger(docId)) return res.status(400).json({ error: 'Invalid id' });
+    const result = await pool.query('SELECT storage_url FROM shipment_documents WHERE id = $1', [docId]);
+    if (!result.rows.length || !result.rows[0].storage_url) {
+      return res.status(404).json({ error: 'Document not found' });
+    }
+    res.redirect(result.rows[0].storage_url);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: err.message });
   }
 });
 

@@ -97,11 +97,11 @@ function rCd(d, op) {
   }
   
   return `<div>
-    <div class="cd ${op ? "op" : ""}" data-cid="${d._id}">
+    <div class="cd ${op ? "op" : ""} ${d._mod ? "mod" : ""}" data-cid="${d._id}">
       <div class="cd-r">
         <div class="cd-t ${im ? "imp" : "dom"}">${im ? "Import" : "Domestic"}</div>
         <div class="cd-i">
-          <div class="cd-n">${d.project_name}</div>
+          <div class="cd-n">${d.project_name}${d._mod ? ' <span class="mod-badge">✏️ Modified</span>' : ''}</div>
           <div class="cd-d">
             ${d.consignee ? d.consignee + " &middot; " : ""} 
             ${d.product || "-"} &middot; ${fN(d.quantity_mt)} MT 

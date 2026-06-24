@@ -53,25 +53,36 @@ document.getElementById('tab-upd-og').addEventListener('click', () => {
   document.getElementById('frm-og').classList.toggle('hid');
   document.getElementById('frm-new').classList.add('hid');
   document.getElementById('sec-upl').classList.add('hid');
+  document.getElementById('sec-ocr').classList.add('hid');
   const sel = document.getElementById('sel-og');
   sel.innerHTML = '<option value="">-- Select --</option>';
   it.filter(d => d.status !== 'Done').forEach(d => {
     sel.innerHTML += `<option value="${d._id}">${d.project_name} (${d.product}) [${d.status}]</option>`;
   });
   document.getElementById('frm-og-fields').innerHTML = '';
+  document.getElementById('og-docs').innerHTML = 'Select a shipment to manage documents.';
 });
 
 document.getElementById('tab-upd-new').addEventListener('click', () => {
   document.getElementById('frm-new').classList.toggle('hid');
   document.getElementById('frm-og').classList.add('hid');
   document.getElementById('sec-upl').classList.add('hid');
+  document.getElementById('sec-ocr').classList.add('hid');
   document.getElementById('frm-new-fields').innerHTML = FLDS.map(f => mkField(f, '')).join('');
+  ocrFilledKeys = new Set(); // manual entry — no OCR-sourced fields
 });
 
 document.getElementById('tab-upl').addEventListener('click', () => {
   document.getElementById('sec-upl').classList.toggle('hid');
   document.getElementById('frm-og').classList.add('hid');
   document.getElementById('frm-new').classList.add('hid');
+  document.getElementById('sec-ocr').classList.add('hid');
+});
+
+document.getElementById('tab-ocr').addEventListener('click', () => {
+  document.getElementById('sec-ocr').classList.toggle('hid');
+  document.getElementById('sec-upl').classList.add('hid');
+  document.getElementById('frm-og').classList.add('hid');
 });
 
 document.getElementById('sel-og').addEventListener('change', function() {
@@ -122,10 +133,11 @@ document.getElementById('btn-upd-og').addEventListener('click', async function()
 
 document.getElementById('btn-can-og').addEventListener('click', () => document.getElementById('frm-og').classList.add('hid'));
 
-document.getElementById('btn-add-new').addEventListener('click', async function() {
+// Step 1: gather + validate, then open the review popup (does NOT save yet).
+document.getElementById('btn-add-new').addEventListener('click', function() {
   const rec = {};
   let hasName = false;
-  
+
   document.querySelectorAll('#frm-new-fields [data-fk]').forEach(el => {
     const k = el.dataset.fk, v = el.value;
     if (k === 'project_name' && v) hasName = true;
@@ -133,17 +145,51 @@ document.getElementById('btn-add-new').addEventListener('click', async function(
     if (el.type === 'number') rec[k] = parseFloat(v) || null;
     else rec[k] = v;
   });
-  
+
   if (!hasName) { tst('Project Name is required', 'er'); return; }
-  
+
   rec.no = D.length ? Math.max(...D.map(d => d.no || 0)) + 1 : 1;
   const rf = rec.eta || rec.etd || rec.start_delivery;
   rec.year = rf ? parseInt(rf.substring(0,4)) : new Date().getFullYear();
   if (!rec.status) rec.status = 'On Going';
-  
-  const btn = document.getElementById('btn-add-new');
-  btn.disabled = true;
 
+  showSaveReview(rec);
+});
+
+function closeReview() { document.getElementById('mo').classList.add('hid'); }
+
+// Verification popup: shows exactly what will be saved, OCR-sourced fields flagged.
+function showSaveReview(rec) {
+  const rows = FLDS
+    .filter(f => rec[f.k] != null && rec[f.k] !== '')
+    .map(f => {
+      const ocr = ocrFilledKeys.has(f.k)
+        ? ' <span class="mod-badge" style="background:#fef9c3;color:#92400e;border-color:#eab308">OCR</span>' : '';
+      return `<tr><td style="color:var(--muted);white-space:nowrap;padding-right:12px">${f.l}</td><td><strong>${rec[f.k]}</strong>${ocr}</td></tr>`;
+    }).join('');
+
+  const note = ocrFilledKeys.size
+    ? `<p style="font-size:11px;color:var(--muted);margin:10px 0 0">Tanda <span class="mod-badge" style="background:#fef9c3;color:#92400e;border-color:#eab308">OCR</span> = hasil baca dokumen — mohon diperiksa kebenarannya.</p>`
+    : '';
+
+  document.getElementById('mt').textContent = 'Review sebelum simpan';
+  document.getElementById('mb').innerHTML = `
+    <p style="font-size:12px;margin-bottom:10px">Periksa data berikut. Jika sudah benar, tekan <strong>Setujui &amp; Simpan</strong>.</p>
+    <table class="upl-tb" style="width:100%">${rows}</table>
+    ${note}
+    <div style="display:flex;gap:8px;margin-top:16px;justify-content:flex-end">
+      <button class="cbtn" id="btn-review-cancel">Batal</button>
+      <button class="abtn" id="btn-review-save">✅ Setujui &amp; Simpan</button>
+    </div>`;
+  document.getElementById('mo').classList.remove('hid');
+  document.getElementById('btn-review-cancel').addEventListener('click', closeReview);
+  document.getElementById('btn-review-save').addEventListener('click', () => commitNewShipment(rec));
+}
+
+// Step 2: user approved in the popup — actually persist.
+async function commitNewShipment(rec) {
+  const btn = document.getElementById('btn-review-save');
+  if (btn) { btn.disabled = true; btn.innerText = 'Menyimpan…'; }
   try {
     const res = await fetch('/api/shipments', {
       method: 'POST',
@@ -152,13 +198,19 @@ document.getElementById('btn-add-new').addEventListener('click', async function(
     });
     if (res.ok) {
       const row = await res.json();
+      closeReview();
       document.getElementById('frm-new').classList.add('hid');
       tst('New shipment saved to database', 'ok');
-      patchLocal(row, true);
+      patchLocal(row, true); // marks it as Modified in the dashboard
+      document.getElementById('sec-ocr').classList.add('hid');
+      document.getElementById('ocr-status').innerHTML = '';
+      ocrFilledKeys = new Set();
     } else throw new Error(await readApiError(res, 'Save failed'));
-  } catch(e) { tst('Failed to save new shipment: ' + e.message, 'er'); }
-  finally { btn.disabled = false; }
-});
+  } catch(e) {
+    tst('Failed to save new shipment: ' + e.message, 'er');
+    if (btn) { btn.disabled = false; btn.innerText = '✅ Setujui & Simpan'; }
+  }
+}
 
 document.getElementById('btn-can-new').addEventListener('click', () => document.getElementById('frm-new').classList.add('hid'));
 
@@ -325,4 +377,189 @@ async function aC() {
     btn.innerText = "Apply Changes";
     btn.disabled = false;
   }
+}
+
+// ==========================================
+// OCR SCAN → AUTO-FILL + DOCUMENT LINKS
+// ==========================================
+let ocrFilledKeys = new Set(); // keys filled from the last OCR scan (for the review badge)
+
+// Attach a document LINK (e.g. Google Drive URL) to a shipment. No file is
+// stored — only the URL is saved, so there is no storage burden.
+async function addDocumentLink(shipmentId, payload) {
+  const res = await fetch(`/api/shipments/${shipmentId}/documents`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload)
+  });
+  if (!res.ok) throw new Error(await readApiError(res, "Save failed"));
+  return res.json();
+}
+
+// ---- OCR drop zone ----
+const oz = document.getElementById("oz"), ofi = document.getElementById("ofi");
+oz.addEventListener("click", () => ofi.click());
+oz.addEventListener("dragover", e => { e.preventDefault(); oz.classList.add("ov"); });
+oz.addEventListener("dragleave", () => oz.classList.remove("ov"));
+oz.addEventListener("drop", e => { e.preventDefault(); oz.classList.remove("ov"); if (e.dataTransfer.files.length) runOcr(e.dataTransfer.files[0]); });
+ofi.addEventListener("change", e => { if (e.target.files.length) runOcr(e.target.files[0]); });
+
+function ocrProcessingHtml(secs) {
+  return `<div class="ch-sec" style="padding:16px"><span class="thk">📄 Memproses OCR… ${secs}s &nbsp;<span style="color:var(--muted);font-weight:400">(dokumen scan bisa ~30–90 dtk, mohon tunggu — jangan tutup tab)</span></span></div>`;
+}
+
+async function runOcr(file) {
+  if (!/\.(pdf|png|jpe?g|webp|tiff?)$/i.test(file.name) && !(file.type || "").match(/pdf|image/)) {
+    tst("Please choose a PDF or image", "er"); return;
+  }
+  const st = document.getElementById("ocr-status");
+  st.innerHTML = ocrProcessingHtml(0);
+  const fd = new FormData();
+  fd.append("file", file);
+  try {
+    const res = await fetch("/api/ocr", { method: "POST", body: fd });
+    if (!res.ok) throw new Error(await readApiError(res, "OCR gagal (HTTP " + res.status + ")"));
+    const { jobId } = await res.json();
+    if (!jobId) throw new Error("Server tidak memberi job OCR");
+    await pollOcr(jobId, st);
+  } catch (e) {
+    st.innerHTML = `<div class="ch-sec" style="padding:14px;color:var(--red)">⚠️ ${e.message}</div>`;
+    tst(e.message, "er");
+  }
+}
+
+// Poll an async OCR job until done/error (or a hard 4-minute cap).
+async function pollOcr(jobId, st) {
+  const started = Date.now();
+  const MAX_MS = 4 * 60 * 1000;
+  let netFails = 0;
+  while (true) {
+    await new Promise(r => setTimeout(r, 2000));
+    const secs = Math.round((Date.now() - started) / 1000);
+    st.innerHTML = ocrProcessingHtml(secs);
+    if (Date.now() - started > MAX_MS) {
+      throw new Error("OCR terlalu lama (>4 menit). Coba file lebih kecil / halaman lebih sedikit, atau isi form manual.");
+    }
+    let data;
+    try {
+      const r = await fetch(`/api/ocr/${jobId}`);
+      if (r.status === 404) throw new Error("Job OCR kedaluwarsa (server mungkin restart). Coba upload ulang.");
+      if (!r.ok) { if (++netFails > 5) throw new Error("Gagal cek status OCR berulang kali."); continue; }
+      data = await r.json();
+      netFails = 0;
+    } catch (e) {
+      if (++netFails > 5) throw e;
+      continue;
+    }
+    if (data.status === "done") {
+      fillNewFormFromOcr(data);
+      const n = Object.keys(data.fields || {}).length;
+      st.innerHTML = `<div class="ch-sec" style="padding:14px">
+        <div style="font-size:13px;font-weight:700;margin-bottom:4px">✅ Extracted ${n} field${n === 1 ? "" : "s"} dalam ${secs}s — review below, then Save. (The scanned file is not stored.)</div>
+        <div style="font-size:11px;color:var(--muted)">Method: ${data.method} · Parser: ${data.source} · <span style="background:#fef9c3;padding:0 4px">Yellow</span> = OCR-filled · <span style="background:#fee2e2;padding:0 4px">Red</span> = low confidence (verify)</div>
+      </div>`;
+      return;
+    }
+    if (data.status === "error") throw new Error(data.error || "OCR gagal memproses dokumen");
+    // else: still processing → continue polling
+  }
+}
+
+function fillNewFormFromOcr(data) {
+  document.getElementById("frm-new").classList.remove("hid");
+  document.getElementById("frm-new-fields").innerHTML = FLDS.map(f => mkField(f, "")).join("");
+  const fields = data.fields || {};
+  const conf = data.confidence || {};
+  ocrFilledKeys = new Set();
+  document.querySelectorAll("#frm-new-fields [data-fk]").forEach(el => {
+    const k = el.dataset.fk;
+    if (!(k in fields) || fields[k] == null || fields[k] === "") return;
+    ocrFilledKeys.add(k);
+    let v = fields[k];
+    if (el.type === "date") {
+      const m = String(v).match(/\d{4}-\d{2}-\d{2}/);
+      v = m ? m[0] : "";
+    } else if (el.type === "number") {
+      v = String(v).replace(/[^\d.\-]/g, "");
+    }
+    el.value = v;
+    const c = Number(conf[k]);
+    const lowConf = Number.isFinite(c) && c < 0.6;
+    el.style.background = lowConf ? "#fee2e2" : "#fef9c3";
+    el.style.borderColor = lowConf ? "#ef4444" : "#eab308";
+    el.title = "OCR-filled" + (Number.isFinite(c) ? " · confidence " + Math.round(c * 100) + "%" : "");
+  });
+  document.getElementById("frm-new").scrollIntoView({ behavior: "smooth", block: "start" });
+}
+
+// ---- Documents manager (inside the Update Shipment form) ----
+document.getElementById("sel-og").addEventListener("change", function () {
+  const id = parseInt(this.value, 10);
+  if (Number.isInteger(id) && id > 0) loadOgDocs(id);
+  else document.getElementById("og-docs").innerHTML = "Select a shipment to manage documents.";
+});
+
+async function loadOgDocs(shipmentId) {
+  const host = document.getElementById("og-docs");
+  host.innerHTML = '<span style="color:var(--muted)">Loading documents…</span>';
+  try {
+    const res = await fetch(`/api/shipments/${shipmentId}/documents`);
+    if (!res.ok) throw new Error(await readApiError(res, "Failed to load"));
+    renderOgDocs(shipmentId, await res.json());
+  } catch (e) {
+    host.innerHTML = `<span style="color:var(--red)">${e.message}</span>`;
+  }
+}
+
+function renderOgDocs(shipmentId, docs) {
+  const host = document.getElementById("og-docs");
+  const list = docs.length ? `<table class="upl-tb" style="width:100%;margin-bottom:10px">
+    <tr><th>Type</th><th>Label</th><th>Link</th><th>Added</th><th></th></tr>
+    ${docs.map(d => `<tr>
+      <td>${d.doc_type || "-"}</td>
+      <td>${d.file_name || "-"}</td>
+      <td><a href="${d.storage_url}" target="_blank" rel="noopener">Open ↗</a></td>
+      <td>${fD(d.uploaded_at)}</td>
+      <td><a href="#" data-del="${d.id}" style="color:var(--red)">Remove</a></td>
+    </tr>`).join("")}
+  </table>` : '<p style="color:var(--muted);margin-bottom:10px">No document links yet.</p>';
+
+  host.innerHTML = `${list}
+    <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+      <select class="sbox" id="og-doc-type" style="width:auto;padding:6px 8px">
+        <option value="BL">BL</option><option value="PIB">PIB</option><option value="SuratJalan">Surat Jalan</option><option value="Other">Other</option>
+      </select>
+      <input type="text" class="sbox" id="og-doc-label" placeholder="Label (optional)" style="width:140px;padding:6px 8px">
+      <input type="url" class="sbox" id="og-doc-url" placeholder="Paste Google Drive link…" style="flex:1;min-width:200px;padding:6px 8px">
+      <button class="abtn" id="og-doc-add" style="padding:6px 12px">🔗 Add Link</button>
+    </div>`;
+
+  document.getElementById("og-doc-add").addEventListener("click", async () => {
+    const url = document.getElementById("og-doc-url").value.trim();
+    if (!/^https?:\/\//i.test(url)) { tst("Paste a valid http(s) link", "er"); return; }
+    const btn = document.getElementById("og-doc-add");
+    btn.disabled = true;
+    try {
+      await addDocumentLink(shipmentId, {
+        storage_url: url,
+        doc_type: document.getElementById("og-doc-type").value,
+        file_name: document.getElementById("og-doc-label").value.trim() || null
+      });
+      tst("Link added", "ok");
+      loadOgDocs(shipmentId);
+    } catch (e) { tst("Failed to add link: " + e.message, "er"); btn.disabled = false; }
+  });
+
+  host.querySelectorAll("[data-del]").forEach(a => {
+    a.addEventListener("click", async (e) => {
+      e.preventDefault();
+      if (!confirm("Remove this document link?")) return;
+      try {
+        const r = await fetch(`/api/documents/${a.dataset.del}`, { method: "DELETE" });
+        if (!r.ok) throw new Error(await readApiError(r, "Delete failed"));
+        tst("Link removed", "ok");
+        loadOgDocs(shipmentId);
+      } catch (err) { tst(err.message, "er"); }
+    });
+  });
 }
