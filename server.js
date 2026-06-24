@@ -33,8 +33,9 @@ app.use(express.static(path.join(__dirname, 'public'), {
 const poolTuning = {
   max: 10,
   idleTimeoutMillis: 30000,
-  connectionTimeoutMillis: 5000,
-  statement_timeout: 15000
+  connectionTimeoutMillis: 10000,
+  statement_timeout: 15000,
+  keepAlive: true
 };
 const pool = process.env.DATABASE_URL
   ? new Pool({ connectionString: process.env.DATABASE_URL, ssl: { rejectUnauthorized: false }, ...poolTuning })
@@ -49,6 +50,41 @@ const pool = process.env.DATABASE_URL
     });
 
 pool.on('error', err => console.error('[pg pool error]', err));
+
+// The prod DB is an EXTERNAL Postgres that intermittently fails to hand out a
+// pooled connection in time — surfacing as a 500 with message
+// "Connection terminated due to connection timeout" (pg-pool acquire timeout).
+// Such failures happen BEFORE the statement is sent, so the query definitely
+// did NOT run and retrying is always safe (no risk of a double INSERT/UPDATE).
+// We deliberately do NOT retry mid-query drops (e.g. bare ECONNRESET) to keep
+// writes exactly-once.
+const ACQUIRE_FAIL_RE = /Connection terminated due to connection timeout|timeout exceeded when trying to connect/i;
+function isRetriableConnError(err) {
+  if (!err) return false;
+  if (['ECONNREFUSED', 'EAI_AGAIN', 'ENOTFOUND'].includes(err.code)) return true; // never reached the server
+  return ACQUIRE_FAIL_RE.test(err.message || '');
+}
+
+// Drop-in replacement for pool.query that retries only pre-execution connection
+// failures, with a short backoff. Same signature/return as pool.query.
+async function dbQuery(text, params) {
+  const MAX_ATTEMPTS = 3;
+  let lastErr;
+  for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+    try {
+      return await pool.query(text, params);
+    } catch (err) {
+      lastErr = err;
+      if (attempt < MAX_ATTEMPTS && isRetriableConnError(err)) {
+        console.warn(`[db retry] attempt ${attempt} failed (${err.message}); retrying…`);
+        await new Promise(r => setTimeout(r, 300 * attempt));
+        continue;
+      }
+      throw err;
+    }
+  }
+  throw lastErr;
+}
 
 let hasUpdatedAtColumn = false;
 
@@ -159,10 +195,23 @@ function isHttpUrl(u) {
   }
 }
 
+// Lightweight health probe — round-trips the DB so an uptime monitor can tell
+// "app up, DB down" (503) apart from "all good" (200).
+app.get('/health', async (req, res) => {
+  res.set('Cache-Control', 'no-store');
+  try {
+    const t0 = Date.now();
+    await dbQuery('SELECT 1');
+    res.json({ ok: true, db: 'up', dbLatencyMs: Date.now() - t0 });
+  } catch (err) {
+    res.status(503).json({ ok: false, db: 'down', error: err.message });
+  }
+});
+
 // GET: Fetch all shipments
 app.get('/api/shipments', async (req, res) => {
   try {
-    const result = await pool.query('SELECT * FROM shipments ORDER BY year DESC NULLS LAST, id DESC');
+    const result = await dbQuery('SELECT * FROM shipments ORDER BY year DESC NULLS LAST, id DESC');
     res.set('Cache-Control', 'no-store');
     res.json(result.rows);
   } catch (err) {
@@ -181,7 +230,7 @@ app.post('/api/shipments', async (req, res) => {
     const values = keys.map(k => data[k]);
     const placeholders = keys.map((_, i) => `$${i + 1}`).join(', ');
     const query = `INSERT INTO shipments (${keys.join(', ')}) VALUES (${placeholders}) RETURNING *`;
-    const result = await pool.query(query, values);
+    const result = await dbQuery(query, values);
     res.json(result.rows[0]);
   } catch (err) {
     console.error(err);
@@ -202,7 +251,7 @@ app.put('/api/shipments/:id', async (req, res) => {
     const values = keys.map(k => data[k]);
     const setClause = buildUpdateSetClause(keys);
     const query = `UPDATE shipments SET ${setClause} WHERE id = $${keys.length + 1} RETURNING *`;
-    const result = await pool.query(query, [...values, id]);
+    const result = await dbQuery(query, [...values, id]);
     if (!result.rows.length) return res.status(404).json({ error: 'Shipment not found' });
     res.json(result.rows[0]);
   } catch (err) {
@@ -344,7 +393,7 @@ app.post('/api/shipments/:id/documents', async (req, res) => {
     }
     const docType = typeof doc_type === 'string' && doc_type ? doc_type.slice(0, 50) : null;
     const label = typeof file_name === 'string' && file_name ? file_name.slice(0, 255) : null;
-    const result = await pool.query(
+    const result = await dbQuery(
       `INSERT INTO shipment_documents (shipment_id, doc_type, file_name, storage_url)
        VALUES ($1, $2, $3, $4)
        RETURNING id, shipment_id, doc_type, file_name, storage_url, uploaded_at`,
@@ -362,7 +411,7 @@ app.get('/api/shipments/:id/documents', async (req, res) => {
   try {
     const id = parseInt(req.params.id, 10);
     if (!Number.isInteger(id)) return res.status(400).json({ error: 'Invalid id' });
-    const result = await pool.query(
+    const result = await dbQuery(
       `SELECT id, shipment_id, doc_type, file_name, storage_url, uploaded_at
        FROM shipment_documents
        WHERE shipment_id = $1
@@ -382,7 +431,7 @@ app.delete('/api/documents/:docId', async (req, res) => {
   try {
     const docId = parseInt(req.params.docId, 10);
     if (!Number.isInteger(docId)) return res.status(400).json({ error: 'Invalid id' });
-    const result = await pool.query('DELETE FROM shipment_documents WHERE id = $1', [docId]);
+    const result = await dbQuery('DELETE FROM shipment_documents WHERE id = $1', [docId]);
     if (!result.rowCount) return res.status(404).json({ error: 'Document not found' });
     res.json({ success: true });
   } catch (err) {
@@ -396,7 +445,7 @@ app.get('/api/documents/:docId', async (req, res) => {
   try {
     const docId = parseInt(req.params.docId, 10);
     if (!Number.isInteger(docId)) return res.status(400).json({ error: 'Invalid id' });
-    const result = await pool.query('SELECT storage_url FROM shipment_documents WHERE id = $1', [docId]);
+    const result = await dbQuery('SELECT storage_url FROM shipment_documents WHERE id = $1', [docId]);
     if (!result.rows.length || !result.rows[0].storage_url) {
       return res.status(404).json({ error: 'Document not found' });
     }
